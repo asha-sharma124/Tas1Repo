@@ -175,6 +175,7 @@ jobs:
             --instance-ids "${{ needs.provision-green.outputs.green_instance_id }}" \
             --document-name "AWS-RunShellScript" \
             --comment "Deploy quotes app ${{ needs.build.outputs.image_tag }}" \
+            --timeout-seconds 900 \
             --parameters 'commands=[
               "#!/bin/bash",
               "set -e",
