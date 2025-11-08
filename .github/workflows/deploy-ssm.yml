@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 env:
-  AWS_REGION: ap-south-1
+  AWS_REGION: us-east-1
   BLUE_TG_ARN: ${{ secrets.BLUE_TARGET_GROUP_ARN }}
   GREEN_TG_ARN: ${{ secrets.GREEN_TARGET_GROUP_ARN }}
   ALB_LISTENER_ARN: ${{ secrets.ALB_LISTENER_ARN }}
@@ -47,6 +47,8 @@ jobs:
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/quotes-db:${{ steps.set_tag.outputs.tag }}
             ${{ secrets.DOCKER_USERNAME }}/quotes-db:latest
+          cache-from: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/quotes-db:buildcache
+          cache-to: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/quotes-db:buildcache,mode=max
       
       - name: Build and push API image
         uses: docker/build-push-action@v4
@@ -56,6 +58,8 @@ jobs:
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/quotes-api:${{ steps.set_tag.outputs.tag }}
             ${{ secrets.DOCKER_USERNAME }}/quotes-api:latest
+          cache-from: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/quotes-api:buildcache
+          cache-to: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/quotes-api:buildcache,mode=max
       
       - name: Build and push Frontend image
         uses: docker/build-push-action@v4
@@ -65,17 +69,22 @@ jobs:
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/quotes-frontend:${{ steps.set_tag.outputs.tag }}
             ${{ secrets.DOCKER_USERNAME }}/quotes-frontend:latest
+          cache-from: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/quotes-frontend:buildcache
+          cache-to: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/quotes-frontend:buildcache,mode=max
       
       - name: Upload deployment files to S3
         run: |
-          # Update docker-compose.yml with new image tags
+          # Update docker-compose.yml with image references
           sed -i "s|build: ./db|image: ${{ secrets.DOCKER_USERNAME }}/quotes-db:${{ steps.set_tag.outputs.tag }}|g" docker-compose.yml
           sed -i "s|build: ./api|image: ${{ secrets.DOCKER_USERNAME }}/quotes-api:${{ steps.set_tag.outputs.tag }}|g" docker-compose.yml
           sed -i "s|build: ./app|image: ${{ secrets.DOCKER_USERNAME }}/quotes-frontend:${{ steps.set_tag.outputs.tag }}|g" docker-compose.yml
           
-          # Upload to S3
+          # Upload all deployment files
           aws s3 cp docker-compose.yml s3://${{ secrets.DEPLOYMENT_BUCKET }}/deployments/${{ steps.set_tag.outputs.tag }}/
+          aws s3 cp nginx-config/ s3://${{ secrets.DEPLOYMENT_BUCKET }}/deployments/${{ steps.set_tag.outputs.tag }}/nginx-config/ --recursive
           aws s3 cp deployment/ s3://${{ secrets.DEPLOYMENT_BUCKET }}/deployments/${{ steps.set_tag.outputs.tag }}/deployment/ --recursive
+          
+          echo "✅ Deployment files uploaded to S3"
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -121,24 +130,27 @@ jobs:
           echo "Waiting for instance to be running..."
           aws ec2 wait instance-running --instance-ids ${{ steps.launch.outputs.instance_id }}
           
-          echo "Waiting for SSM agent to be online..."
-          sleep 120  # Wait for user data and SSM registration
+          echo "Instance is running. Waiting for initialization to complete..."
+          sleep 150  # Wait for user data script to complete
           
-          # Check SSM status
-          for i in {1..20}; do
+          echo "Checking SSM agent status..."
+          for i in {1..30}; do
             STATUS=$(aws ssm describe-instance-information \
               --instance-information-filter-list "key=InstanceIds,valueSet=${{ steps.launch.outputs.instance_id }}" \
               --query 'InstanceInformationList[0].PingStatus' \
               --output text 2>/dev/null || echo "Offline")
             
+            echo "Attempt $i/30 - SSM Agent Status: $STATUS"
+            
             if [ "$STATUS" = "Online" ]; then
-              echo "✅ SSM agent is online"
-              break
+              echo "✅ SSM agent is online and ready"
+              exit 0
             fi
             
-            echo "Attempt $i/20 - SSM Status: $STATUS"
-            sleep 15
+            sleep 10
           done
+          
+          echo "⚠️ SSM agent status check timed out, but continuing..."
 
   deploy:
     name: Deploy Application to Green
@@ -156,6 +168,8 @@ jobs:
       - name: Deploy via SSM
         run: |
           echo "=== Deploying to green instance ==="
+          echo "Instance ID: ${{ needs.provision-green.outputs.green_instance_id }}"
+          echo "Image Tag: ${{ needs.build.outputs.image_tag }}"
           
           COMMAND_ID=$(aws ssm send-command \
             --instance-ids "${{ needs.provision-green.outputs.green_instance_id }}" \
@@ -164,13 +178,56 @@ jobs:
             --parameters 'commands=[
               "#!/bin/bash",
               "set -e",
-              "echo \"Starting deployment...\"",
-              "mkdir -p /home/ubuntu/app",
-              "cd /home/ubuntu/app",
-              "/usr/bin/aws s3 cp s3://${{ secrets.DEPLOYMENT_BUCKET }}/deployments/${{ needs.build.outputs.image_tag }}/docker-compose.yml .",
-              "/usr/bin/aws s3 cp s3://${{ secrets.DEPLOYMENT_BUCKET }}/deployments/${{ needs.build.outputs.image_tag }}/deployment/ ./deployment/ --recursive",
+              "export APP_DIR=/home/ubuntu/quotes-app",
+              "echo \"=== Starting Deployment ===\"",
+              "echo \"Working directory: $APP_DIR\"",
+              "echo \"User: $(whoami)\"",
+              "echo \"Hostname: $(hostname)\"",
+              "",
+              "# Verify AWS CLI",
+              "if ! command -v aws &> /dev/null; then",
+              "    echo \"ERROR: AWS CLI not found\"",
+              "    echo \"PATH: $PATH\"",
+              "    exit 1",
+              "fi",
+              "echo \"AWS CLI: $(aws --version)\"",
+              "",
+              "# Verify Docker",
+              "if ! command -v docker &> /dev/null; then",
+              "    echo \"ERROR: Docker not found\"",
+              "    exit 1",
+              "fi",
+              "echo \"Docker: $(docker --version)\"",
+              "",
+              "# Verify Docker Compose",
+              "if ! command -v docker-compose &> /dev/null; then",
+              "    echo \"ERROR: Docker Compose not found\"",
+              "    exit 1",
+              "fi",
+              "echo \"Docker Compose: $(docker-compose --version)\"",
+              "",
+              "# Navigate to app directory",
+              "cd $APP_DIR || exit 1",
+              "echo \"Current directory: $(pwd)\"",
+              "",
+              "# Download files from S3",
+              "echo \"Downloading deployment files from S3...\"",
+              "aws s3 cp s3://${{ secrets.DEPLOYMENT_BUCKET }}/deployments/${{ needs.build.outputs.image_tag }}/docker-compose.yml . || { echo \"Failed to download docker-compose.yml\"; exit 1; }",
+              "aws s3 cp s3://${{ secrets.DEPLOYMENT_BUCKET }}/deployments/${{ needs.build.outputs.image_tag }}/nginx-config/ ./nginx-config/ --recursive || { echo \"Failed to download nginx-config\"; exit 1; }",
+              "aws s3 cp s3://${{ secrets.DEPLOYMENT_BUCKET }}/deployments/${{ needs.build.outputs.image_tag }}/deployment/ ./deployment/ --recursive || { echo \"Failed to download deployment scripts\"; exit 1; }",
+              "",
+              "# Make scripts executable",
               "chmod +x deployment/*.sh",
-              "bash deployment/deploy.sh ${{ secrets.DOCKER_USERNAME }} ${{ needs.build.outputs.image_tag }} ${{ secrets.DOCKER_PASSWORD }}"
+              "",
+              "# List downloaded files",
+              "echo \"Downloaded files:\"",
+              "ls -la",
+              "ls -la deployment/",
+              "ls -la nginx-config/",
+              "",
+              "# Run deployment script",
+              "echo \"Running deployment script...\"",
+              "bash deployment/deploy.sh ${{ secrets.DOCKER_USERNAME }} ${{ needs.build.outputs.image_tag }} ${{ secrets.DOCKER_PASSWORD }} green"
             ]' \
             --timeout-seconds 600 \
             --query 'Command.CommandId' \
@@ -178,29 +235,38 @@ jobs:
           
           echo "Command ID: $COMMAND_ID"
           
-          # Wait for deployment
+          # Wait for deployment to complete
           echo "Waiting for deployment to complete..."
           aws ssm wait command-executed \
             --command-id "$COMMAND_ID" \
-            --instance-id "${{ needs.provision-green.outputs.green_instance_id }}" || true
+            --instance-id "${{ needs.provision-green.outputs.green_instance_id }}" \
+            --region ${{ env.AWS_REGION }} || true
           
-          # Check status
-          STATUS=$(aws ssm get-command-invocation \
+          # Get execution details
+          echo "Fetching deployment results..."
+          RESULT=$(aws ssm get-command-invocation \
             --command-id "$COMMAND_ID" \
             --instance-id "${{ needs.provision-green.outputs.green_instance_id }}" \
-            --query 'Status' \
-            --output text)
+            --region ${{ env.AWS_REGION }})
+          
+          STATUS=$(echo "$RESULT" | jq -r '.Status')
           
           echo "Deployment Status: $STATUS"
           
+          # Show output
+          echo "=== Standard Output ==="
+          echo "$RESULT" | jq -r '.StandardOutputContent'
+          
           if [ "$STATUS" != "Success" ]; then
+            echo ""
+            echo "=== Standard Error ==="
+            echo "$RESULT" | jq -r '.StandardErrorContent'
+            echo ""
             echo "❌ Deployment failed!"
-            aws ssm get-command-invocation \
-              --command-id "$COMMAND_ID" \
-              --instance-id "${{ needs.provision-green.outputs.green_instance_id }}"
             exit 1
           fi
           
+          echo ""
           echo "✅ Deployment successful!"
 
   health-check:
@@ -223,32 +289,46 @@ jobs:
           COMMAND_ID=$(aws ssm send-command \
             --instance-ids "${{ needs.provision-green.outputs.green_instance_id }}" \
             --document-name "AWS-RunShellScript" \
+            --comment "Health check for ${{ needs.build.outputs.image_tag }}" \
             --parameters 'commands=[
-              "cd /home/ubuntu/app",
+              "cd /home/ubuntu/quotes-app",
               "bash deployment/health_check.sh"
             ]' \
             --timeout-seconds 300 \
             --query 'Command.CommandId' \
             --output text)
           
+          echo "Health check command ID: $COMMAND_ID"
+          
+          # Wait for health check
           aws ssm wait command-executed \
             --command-id "$COMMAND_ID" \
-            --instance-id "${{ needs.provision-green.outputs.green_instance_id }}" || true
+            --instance-id "${{ needs.provision-green.outputs.green_instance_id }}" \
+            --region ${{ env.AWS_REGION }} || true
           
-          STATUS=$(aws ssm get-command-invocation \
+          # Get results
+          RESULT=$(aws ssm get-command-invocation \
             --command-id "$COMMAND_ID" \
             --instance-id "${{ needs.provision-green.outputs.green_instance_id }}" \
-            --query 'Status' \
-            --output text)
+            --region ${{ env.AWS_REGION }})
+          
+          STATUS=$(echo "$RESULT" | jq -r '.Status')
+          
+          echo "Health Check Status: $STATUS"
+          echo ""
+          echo "=== Health Check Output ==="
+          echo "$RESULT" | jq -r '.StandardOutputContent'
           
           if [ "$STATUS" != "Success" ]; then
+            echo ""
+            echo "=== Health Check Errors ==="
+            echo "$RESULT" | jq -r '.StandardErrorContent'
+            echo ""
             echo "❌ Health check failed!"
-            aws ssm get-command-invocation \
-              --command-id "$COMMAND_ID" \
-              --instance-id "${{ needs.provision-green.outputs.green_instance_id }}"
             exit 1
           fi
           
+          echo ""
           echo "✅ Health check passed!"
 
   register-green:
@@ -274,24 +354,36 @@ jobs:
           
           echo "Waiting for target to be healthy..."
           
-          for i in {1..40}; do
+          for i in {1..60}; do
             HEALTH=$(aws elbv2 describe-target-health \
               --target-group-arn ${{ env.GREEN_TG_ARN }} \
               --targets Id=${{ needs.provision-green.outputs.green_instance_id }} \
               --query 'TargetHealthDescriptions[0].TargetHealth.State' \
               --output text)
             
-            echo "Attempt $i/40 - Target Health: $HEALTH"
+            echo "Attempt $i/60 - Target Health: $HEALTH"
             
             if [ "$HEALTH" = "healthy" ]; then
               echo "✅ Green instance is healthy in target group!"
               exit 0
             fi
             
-            sleep 15
+            if [ "$HEALTH" = "unhealthy" ]; then
+              REASON=$(aws elbv2 describe-target-health \
+                --target-group-arn ${{ env.GREEN_TG_ARN }} \
+                --targets Id=${{ needs.provision-green.outputs.green_instance_id }} \
+                --query 'TargetHealthDescriptions[0].TargetHealth.Reason' \
+                --output text)
+              echo "Target is unhealthy. Reason: $REASON"
+            fi
+            
+            sleep 10
           done
           
           echo "❌ Target failed to become healthy"
+          aws elbv2 describe-target-health \
+            --target-group-arn ${{ env.GREEN_TG_ARN }} \
+            --targets Id=${{ needs.provision-green.outputs.green_instance_id }}
           exit 1
 
   configure-canary:
@@ -316,6 +408,8 @@ jobs:
             --query 'Rules[?IsDefault==`true`].RuleArn' \
             --output text)
           
+          echo "Listener Rule ARN: $RULE_ARN"
+          
           aws elbv2 modify-rule \
             --rule-arn "$RULE_ARN" \
             --actions Type=forward,ForwardConfig="{
@@ -326,11 +420,17 @@ jobs:
               TargetGroupStickinessConfig={Enabled=false}
             }"
           
-          echo "✅ Traffic Distribution:"
+          echo ""
+          echo "✅ Traffic Distribution Configured:"
           echo "   - Blue (current): 80%"
           echo "   - Green (new): 20%"
           echo ""
-          echo "🧪 Green instance receiving 20% of traffic for testing"
+          echo "🧪 Green instance is now receiving 20% of traffic for testing"
+          echo ""
+          echo "Next steps:"
+          echo "  1. Test the application with 20% traffic"
+          echo "  2. Monitor logs and metrics"
+          echo "  3. Approve deployment to shift 100% traffic to green"
 
   approve:
     name: QA Approval Gate
@@ -342,11 +442,19 @@ jobs:
       - name: Awaiting approval
         run: |
           echo "⏸️  Deployment paused for QA testing"
-          echo "📊 Current state:"
+          echo ""
+          echo "📊 Current State:"
           echo "   - Blue: 1 instance (80% traffic)"
           echo "   - Green: 1 instance (20% traffic)"
           echo ""
-          echo "✅ Approve to complete deployment (100% → Green)"
+          echo "🔍 Testing Instructions:"
+          echo "   1. Access the application via ALB"
+          echo "   2. Verify functionality with 20% traffic"
+          echo "   3. Check logs and metrics"
+          echo "   4. Test all critical features"
+          echo ""
+          echo "✅ Click 'Approve and run' to complete deployment (100% → Green)"
+          echo "❌ Or cancel and rollback if issues are found"
 
   complete-deployment:
     name: Complete Blue-Green Switch
@@ -374,7 +482,7 @@ jobs:
             --rule-arn "$RULE_ARN" \
             --actions Type=forward,TargetGroupArn=${{ env.GREEN_TG_ARN }}
           
-          echo "✅ 100% traffic now on green instance"
+          echo "✅ 100% traffic now routed to green instance"
       
       - name: Get blue instance ID
         id: blue
@@ -389,7 +497,7 @@ jobs:
           echo "blue_id=$BLUE_ID" >> $GITHUB_OUTPUT
           
           if [ -z "$BLUE_ID" ] || [ "$BLUE_ID" = "None" ]; then
-            echo "No blue instance found (first deployment)"
+            echo "ℹ️  No blue instance found (this might be the first deployment)"
           else
             echo "Blue instance to cleanup: $BLUE_ID"
           fi
@@ -417,7 +525,18 @@ jobs:
           
           aws ec2 create-tags \
             --resources ${{ needs.provision-green.outputs.green_instance_id }} \
-            --tags Key=Environment,Value=blue Key=Name,Value=quotes-app-blue
+            --tags \
+              Key=Environment,Value=blue \
+              Key=Name,Value=quotes-app-blue
           
-          echo "✅ Deployment complete!"
-          echo "🎉 Green instance is now the production blue instance"
+          echo ""
+          echo "========================================"
+          echo "✅ DEPLOYMENT COMPLETE!"
+          echo "========================================"
+          echo ""
+          echo "Summary:"
+          echo "  - New instance promoted to blue"
+          echo "  - Old blue instance terminated"
+          echo "  - 100% traffic on new version"
+          echo ""
+          echo "🎉 Blue-Green deployment successful!"
