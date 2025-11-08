@@ -178,6 +178,12 @@ jobs:
             --parameters 'commands=[
               "#!/bin/bash",
               "set -e",
+              "echo \"Creating directories...\"",
+              "mkdir -p /home/ubuntu/quotes-app/deployment",
+              "mkdir -p /home/ubuntu/quotes-app/nginx-config",
+              "chown -R ubuntu:ubuntu /home/ubuntu",
+              "ls -la /home/ubuntu/",
+              "echo \"Directories created successfully\"",
               "export APP_DIR=/home/ubuntu/quotes-app",
               "echo \"=== Starting Deployment ===\"",
               "echo \"Working directory: $APP_DIR\"",
@@ -274,7 +280,7 @@ jobs:
     needs: [build, provision-green, deploy]
     runs-on: ubuntu-latest
     
-    
+
     steps:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
