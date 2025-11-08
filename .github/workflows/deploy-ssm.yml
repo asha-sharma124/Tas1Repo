@@ -632,14 +632,12 @@
 #   #         echo ""
 #   #         echo "🎉 Blue-Green deployment successful!"
 
-name: Single Instance Blue-Green Deployment
-
+  name: Single Instance Blue-Green Deployment
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
-
 
 env:
   AWS_REGION: ap-south-1
@@ -648,7 +646,6 @@ env:
   ALB_LISTENER_ARN: ${{ secrets.ALB_LISTENER_ARN }}
   LAUNCH_TEMPLATE_ID: ${{ secrets.LAUNCH_TEMPLATE_ID }}
   PRIVATE_SUBNET_ID: ${{ secrets.PRIVATE_SUBNET_ID }}
-
 
 jobs:
   build:
@@ -725,7 +722,6 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_REGION: ${{ env.AWS_REGION }}
 
-
   provision-green:
     name: Launch Green Instance
     needs: build
@@ -788,7 +784,6 @@ jobs:
           
           echo "⚠️ SSM agent status check timed out, but continuing..."
 
-
   deploy:
     name: Deploy Application to Green
     needs: [build, provision-green]
@@ -827,8 +822,8 @@ jobs:
               "",
               "echo \"Downloading files from S3...\"",
               "aws s3 cp s3://${{ secrets.DEPLOYMENT_BUCKET }}/deployments/${{ needs.build.outputs.image_tag }}/docker-compose.yml .",
-              "aws s3 cp s3://${{ secrets.DEPLOYMENT_BUCKET }}/deployments/${{ needs.build.outputs.image_tag }}/nginx-config/ ./nginx-config/ --recursive",
-              "aws s3 cp s3://${{ secrets.DEPLOYMENT_BUCKET }}/deployments/${{ needs.build.outputs.image_tag }}/deployment/ ./deployment/ --recursive",
+              "aws s3 cp s3://${{ secrets.DEPLOYMENT_BUCKET }}/deployments/${{ needs.build.outputs.tag }}/nginx-config/ ./nginx-config/ --recursive",
+              "aws s3 cp s3://${{ secrets.DEPLOYMENT_BUCKET }}/deployments/${{ needs.build.outputs.tag }}/deployment/ ./deployment/ --recursive",
               "",
               "chmod +x deployment/*.sh",
               "echo \"Files downloaded:\"",
@@ -891,7 +886,6 @@ jobs:
             --region ${{ env.AWS_REGION }})
           echo "$RESULT" | jq -r '.StandardOutputContent'
           exit 1
-
 
   health-check:
     name: Health Check Green Instance
@@ -1098,7 +1092,6 @@ jobs:
           echo "============================================"
           echo "Configuring Canary Traffic Split"
           echo "============================================"
-          echo ""
           echo "Green instance is HEALTHY and ready."
           echo "Now routing 20% traffic for testing..."
           echo ""
@@ -1122,7 +1115,6 @@ jobs:
           echo "💡 No 503 errors - target was healthy before routing"
           echo ""
 
-
   approve:
     name: QA Approval Gate
     needs: configure-canary
@@ -1139,7 +1131,6 @@ jobs:
           echo "   - Green: 1 instance (20% traffic)"
           echo ""
           echo "✅ Click 'Approve and run' to complete deployment (100% → Green)"
-
 
   complete-deployment:
     name: Complete Blue-Green Switch
