@@ -1260,3 +1260,5 @@ jobs:
           echo "   • Green TG → New version (canary testing)"
           echo ""
           echo "🎉 Blue-Green deployment successful!"
+
+
