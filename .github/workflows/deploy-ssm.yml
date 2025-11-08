@@ -165,7 +165,8 @@ jobs:
               "#!/bin/bash",
               "set -e",
               "echo \"Starting deployment...\"",
-              "cd /opt/app",
+              "mkdir -p /home/ubuntu/app",
+              "cd /home/ubuntu/app",
               "aws s3 cp s3://${{ secrets.DEPLOYMENT_BUCKET }}/deployments/${{ needs.build.outputs.image_tag }}/docker-compose.yml .",
               "aws s3 cp s3://${{ secrets.DEPLOYMENT_BUCKET }}/deployments/${{ needs.build.outputs.image_tag }}/deployment/ ./deployment/ --recursive",
               "chmod +x deployment/*.sh",
@@ -223,7 +224,7 @@ jobs:
             --instance-ids "${{ needs.provision-green.outputs.green_instance_id }}" \
             --document-name "AWS-RunShellScript" \
             --parameters 'commands=[
-              "cd /opt/app",
+              "cd /home/ubuntu/app",
               "bash deployment/health_check.sh"
             ]' \
             --timeout-seconds 300 \
