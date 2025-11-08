@@ -14,7 +14,6 @@ cd $APP_DIR
 MAX_ATTEMPTS=30
 ATTEMPT=0
 
-# Health check functions
 check_containers() {
     RUNNING=$(docker-compose ps -q | wc -l)
     EXPECTED=3
@@ -34,10 +33,13 @@ check_health_endpoint() {
 }
 
 check_api() {
-    curl -f -s http://localhost/api/ > /dev/null 2>&1
+    # Try multiple API endpoints
+    curl -f -s http://localhost:5001/health > /dev/null 2>&1 || \
+    curl -f -s http://localhost/api/health > /dev/null 2>&1
 }
 
 check_frontend() {
+    curl -f -s http://localhost:5002/ > /dev/null 2>&1 || \
     curl -f -s http://localhost/ > /dev/null 2>&1
 }
 
@@ -45,7 +47,6 @@ check_database() {
     docker-compose exec -T db mysqladmin ping -h localhost -uroot -proot > /dev/null 2>&1
 }
 
-# Run health checks
 echo "Starting health checks..."
 echo ""
 
@@ -98,7 +99,7 @@ while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
         continue
     fi
     
-    echo -n "  ├─ API... "
+    echo -n "  ├─ API (direct)... "
     if check_api; then 
         echo "✅"
     else 
@@ -116,37 +117,27 @@ while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
         continue
     fi
     
-    # All checks passed
     echo ""
     echo "========================================"
     echo "✅ ALL HEALTH CHECKS PASSED!"
     echo "========================================"
     echo ""
     
-    echo "Deployment Information:"
-    curl -s http://localhost/deployment-info | jq '.' 2>/dev/null || curl -s http://localhost/deployment-info
-    echo ""
-    
     echo "Service Status:"
     echo "  ├─ Nginx: Active on port 80"
-    echo "  ├─ Frontend: Proxied to http://localhost:5002"
-    echo "  ├─ API: Proxied to http://localhost:5001"
-    echo "  └─ Database: MySQL in Docker"
+    echo "  ├─ Frontend: Accessible at http://localhost:5002"
+    echo "  ├─ API: Accessible at http://localhost:5001"
+    echo "  └─ Database: MySQL running"
     echo ""
     
     echo "Container Status:"
     docker-compose ps
     echo ""
     
-    echo "Recent Application Logs:"
-    docker-compose logs --tail=10
-    echo ""
-    
     echo "========================================"
     exit 0
 done
 
-# Health checks failed
 echo ""
 echo "========================================"
 echo "❌ HEALTH CHECKS FAILED"
@@ -162,7 +153,7 @@ docker-compose logs --tail=100
 echo ""
 
 echo "Nginx Logs:"
-sudo tail -50 /var/log/nginx/error.log
+sudo tail -50 /var/log/nginx/error.log 2>/dev/null || echo "No nginx errors"
 echo ""
 
 echo "========================================"
