@@ -3,20 +3,149 @@
 <head>
     <meta charset="UTF-8">
     <title>Quotes Gallery</title>
+    <style>
+        /* Global styles */
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        body {
+            background: linear-gradient(135deg, #f5f7fa, #c3cfe2);
+            display: flex;
+            justify-content: center;
+            align-items: flex-start;
+            min-height: 100vh;
+            padding: 50px 20px;
+            color: #333;
+        }
+
+        h1 {
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 3rem;
+            color: #4a4a4a;
+            text-shadow: 1px 1px 3px rgba(0,0,0,0.1);
+        }
+
+        /* Form styling */
+        form {
+            display: flex;
+            flex-direction: column;
+            width: 100%;
+            max-width: 500px;
+            margin-bottom: 40px;
+            background: #fff;
+            padding: 30px;
+            border-radius: 15px;
+            box-shadow: 0 10px 20px rgba(0,0,0,0.1);
+        }
+
+        form input {
+            padding: 15px;
+            margin-bottom: 20px;
+            border-radius: 8px;
+            border: 1px solid #ccc;
+            font-size: 1rem;
+            transition: all 0.3s ease;
+        }
+
+        form input:focus {
+            outline: none;
+            border-color: #6c63ff;
+            box-shadow: 0 0 5px rgba(108, 99, 255, 0.5);
+        }
+
+        form button {
+            padding: 15px;
+            background-color: #6c63ff;
+            color: #fff;
+            font-size: 1rem;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        form button:hover {
+            background-color: #5751d9;
+        }
+
+        /* Quotes list */
+        ul {
+            list-style: none;
+            width: 100%;
+            max-width: 700px;
+        }
+
+        ul li {
+            background: #fff;
+            margin-bottom: 15px;
+            padding: 20px 25px;
+            border-radius: 12px;
+            box-shadow: 0 8px 16px rgba(0,0,0,0.1);
+            font-size: 1.2rem;
+            color: #555;
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+        }
+
+        ul li:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 12px 24px rgba(0,0,0,0.15);
+        }
+
+        ul li::before {
+            content: '“';
+            font-size: 2rem;
+            color: #6c63ff;
+            margin-right: 5px;
+        }
+
+        ul li::after {
+            content: '”';
+            font-size: 2rem;
+            color: #6c63ff;
+            margin-left: 5px;
+        }
+
+        /* Author styling */
+        ul li span {
+            display: block;
+            text-align: right;
+            font-weight: bold;
+            margin-top: 10px;
+            color: #6c63ff;
+        }
+
+        /* Responsive */
+        @media (max-width: 600px) {
+            form, ul {
+                width: 100%;
+                padding: 0 10px;
+            }
+        }
+    </style>
 </head>
 <body>
-    <h1>Quotes Gallery</h1>
-    <form method="POST">
-        <input type="text" name="quote" placeholder="Enter a quote" required>
-        <input type="text" name="author" placeholder="Author">
-        <button type="submit">Submit</button>
-    </form>
-    <ul>
-        {% for quote in quotes %}
-            <li>"{{ quote.quote }}" - {{ quote.author }}</li>
-        {% endfor %}
-    </ul>
+    <div>
+        <h1>Quotes Gallery</h1>
+        <form method="POST">
+            <input type="text" name="quote" placeholder="Enter a quote" required>
+            <input type="text" name="author" placeholder="Author">
+            <button type="submit">Submit</button>
+        </form>
+        <ul>
+            {% for quote in quotes %}
+                <li>
+                    {{ quote.quote }}
+                    {% if quote.author %}
+                        <span>- {{ quote.author }}</span>
+                    {% endif %}
+                </li>
+            {% endfor %}
+        </ul>
+    </div>
 </body>
 </html>
-
-
