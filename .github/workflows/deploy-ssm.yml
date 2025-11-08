@@ -409,6 +409,7 @@ jobs:
           echo ""
           echo "🧪 Green instance is now receiving 20% of traffic for testing"
 
+
   approve:
     name: QA Approval Gate
     needs: configure-canary
