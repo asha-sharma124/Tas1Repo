@@ -420,7 +420,6 @@ jobs:
           echo "   - Green: 1 instance (20% traffic)"
           echo ""
           echo "✅ Click 'Approve and run' to complete deployment (100% → Green)"
-          
   complete-deployment:
     name: Complete Blue-Green Switch
     needs: [provision-green, approve]
@@ -433,18 +432,6 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
-      
-      - name: Shift 100% traffic to green
-        run: |
-          echo "Shifting 100% traffic to green..."
-          echo "Listener ARN: ${{ env.ALB_LISTENER_ARN }}"
-          
-          # Use modify-listener, not modify-rule
-          aws elbv2 modify-listener \
-            --listener-arn ${{ env.ALB_LISTENER_ARN }} \
-            --default-actions Type=forward,TargetGroupArn=${{ env.GREEN_TG_ARN }}
-          
-          echo "✅ 100% traffic now routed to green instance"
       
       - name: Get blue instance ID
         id: blue
@@ -461,44 +448,186 @@ jobs:
           if [ -z "$BLUE_ID" ] || [ "$BLUE_ID" = "None" ]; then
             echo "ℹ️  No blue instance found (this might be the first deployment)"
           else
-            echo "Blue instance to cleanup: $BLUE_ID"
+            echo "Found blue instance: $BLUE_ID"
           fi
       
-      - name: Deregister and terminate blue instance
+      - name: Shift 100% traffic to green target group
+        run: |
+          echo "Shifting 100% traffic to green target group..."
+          echo "Listener ARN: ${{ env.ALB_LISTENER_ARN }}"
+          
+          aws elbv2 modify-listener \
+            --listener-arn ${{ env.ALB_LISTENER_ARN }} \
+            --default-actions Type=forward,TargetGroupArn=${{ env.GREEN_TG_ARN }}
+          
+          echo "✅ 100% traffic now routed to green target group"
+      
+      - name: Deregister blue instance from blue target group
         if: steps.blue.outputs.blue_id != '' && steps.blue.outputs.blue_id != 'None'
         run: |
-          echo "Deregistering blue instance from target group..."
+          echo "Deregistering blue instance from blue target group..."
           
           aws elbv2 deregister-targets \
             --target-group-arn ${{ env.BLUE_TG_ARN }} \
-            --targets Id=${{ steps.blue.outputs.blue_id }} || true
+            --targets Id=${{ steps.blue.outputs.blue_id }}
           
+          echo "✅ Blue instance deregistered from blue target group"
           echo "Waiting for connection draining (30 seconds)..."
           sleep 30
-          
+      
+      - name: Terminate old blue instance
+        if: steps.blue.outputs.blue_id != '' && steps.blue.outputs.blue_id != 'None'
+        run: |
           echo "Terminating old blue instance..."
           aws ec2 terminate-instances --instance-ids ${{ steps.blue.outputs.blue_id }}
           
-          echo "✅ Old blue instance terminated"
+          echo "✅ Old blue instance terminated: ${{ steps.blue.outputs.blue_id }}"
       
-      - name: Promote green to blue
+      - name: Swap target groups - Promote green to blue
         run: |
-          echo "Tagging green instance as new blue..."
+          echo "============================================"
+          echo "Starting Target Group Swap Process"
+          echo "============================================"
+          echo ""
           
+          # Step 1: Update instance tags
+          echo "1️⃣ Promoting green instance to blue..."
           aws ec2 create-tags \
             --resources ${{ needs.provision-green.outputs.green_instance_id }} \
             --tags \
               Key=Environment,Value=blue \
               Key=Name,Value=quotes-app-blue
           
+          echo "✅ Instance tags updated to 'blue'"
           echo ""
-          echo "========================================"
-          echo "✅ DEPLOYMENT COMPLETE!"
-          echo "========================================"
+          
+          # Step 2: Register to blue target group
+          echo "2️⃣ Registering instance to blue target group..."
+          aws elbv2 register-targets \
+            --target-group-arn ${{ env.BLUE_TG_ARN }} \
+            --targets Id=${{ needs.provision-green.outputs.green_instance_id }}
+          
+          echo "✅ Instance registered to blue target group"
+          echo "   Waiting for registration to complete..."
+          sleep 15
           echo ""
-          echo "Summary:"
-          echo "  - New instance promoted to blue"
-          echo "  - Old blue instance terminated"
-          echo "  - 100% traffic on new version"
+          
+          # Step 3: Update listener to point to blue target group
+          echo "3️⃣ Switching listener to blue target group..."
+          aws elbv2 modify-listener \
+            --listener-arn ${{ env.ALB_LISTENER_ARN }} \
+            --default-actions Type=forward,TargetGroupArn=${{ env.BLUE_TG_ARN }}
+          
+          echo "✅ Listener now points to blue target group"
+          echo "   Waiting for traffic to stabilize..."
+          sleep 10
+          echo ""
+          
+          # Step 4: Deregister from green target group
+          echo "4️⃣ Deregistering instance from green target group..."
+          aws elbv2 deregister-targets \
+            --target-group-arn ${{ env.GREEN_TG_ARN }} \
+            --targets Id=${{ needs.provision-green.outputs.green_instance_id }}
+          
+          echo "✅ Instance deregistered from green target group"
+          echo ""
+          
+          echo "============================================"
+          echo "✅ TARGET GROUP SWAP COMPLETE!"
+          echo "============================================"
+          echo ""
+          echo "📊 Final Configuration:"
+          echo "   • Instance: ${{ needs.provision-green.outputs.green_instance_id }}"
+          echo "   • Tagged as: blue"
+          echo "   • Registered to: Blue Target Group"
+          echo "   • ALB Listener: Points to Blue TG (100% traffic)"
+          echo "   • Green TG: Empty (ready for next deployment)"
+          echo ""
+          echo "🔄 Next Deployment Will Use:"
+          echo "   • Blue TG → Current production (this version)"
+          echo "   • Green TG → New version (canary testing)"
           echo ""
           echo "🎉 Blue-Green deployment successful!"
+
+
+  # complete-deployment:
+  #   name: Complete Blue-Green Switch
+  #   needs: [provision-green, approve]
+  #   runs-on: ubuntu-latest
+    
+  #   steps:
+  #     - name: Configure AWS credentials
+  #       uses: aws-actions/configure-aws-credentials@v2
+  #       with:
+  #         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  #         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  #         aws-region: ${{ env.AWS_REGION }}
+      
+  #     - name: Shift 100% traffic to green
+  #       run: |
+  #         echo "Shifting 100% traffic to green..."
+  #         echo "Listener ARN: ${{ env.ALB_LISTENER_ARN }}"
+          
+  #         # Use modify-listener, not modify-rule
+  #         aws elbv2 modify-listener \
+  #           --listener-arn ${{ env.ALB_LISTENER_ARN }} \
+  #           --default-actions Type=forward,TargetGroupArn=${{ env.GREEN_TG_ARN }}
+          
+  #         echo "✅ 100% traffic now routed to green instance"
+      
+  #     - name: Get blue instance ID
+  #       id: blue
+  #       run: |
+  #         BLUE_ID=$(aws ec2 describe-instances \
+  #           --filters \
+  #             "Name=tag:Environment,Values=blue" \
+  #             "Name=instance-state-name,Values=running" \
+  #           --query 'Reservations[0].Instances[0].InstanceId' \
+  #           --output text 2>/dev/null || echo "")
+          
+  #         echo "blue_id=$BLUE_ID" >> $GITHUB_OUTPUT
+          
+  #         if [ -z "$BLUE_ID" ] || [ "$BLUE_ID" = "None" ]; then
+  #           echo "ℹ️  No blue instance found (this might be the first deployment)"
+  #         else
+  #           echo "Blue instance to cleanup: $BLUE_ID"
+  #         fi
+      
+  #     - name: Deregister and terminate blue instance
+  #       if: steps.blue.outputs.blue_id != '' && steps.blue.outputs.blue_id != 'None'
+  #       run: |
+  #         echo "Deregistering blue instance from target group..."
+          
+  #         aws elbv2 deregister-targets \
+  #           --target-group-arn ${{ env.BLUE_TG_ARN }} \
+  #           --targets Id=${{ steps.blue.outputs.blue_id }} || true
+          
+  #         echo "Waiting for connection draining (30 seconds)..."
+  #         sleep 30
+          
+  #         echo "Terminating old blue instance..."
+  #         aws ec2 terminate-instances --instance-ids ${{ steps.blue.outputs.blue_id }}
+          
+  #         echo "✅ Old blue instance terminated"
+      
+  #     - name: Promote green to blue
+  #       run: |
+  #         echo "Tagging green instance as new blue..."
+          
+  #         aws ec2 create-tags \
+  #           --resources ${{ needs.provision-green.outputs.green_instance_id }} \
+  #           --tags \
+  #             Key=Environment,Value=blue \
+  #             Key=Name,Value=quotes-app-blue
+          
+  #         echo ""
+  #         echo "========================================"
+  #         echo "✅ DEPLOYMENT COMPLETE!"
+  #         echo "========================================"
+  #         echo ""
+  #         echo "Summary:"
+  #         echo "  - New instance promoted to blue"
+  #         echo "  - Old blue instance terminated"
+  #         echo "  - 100% traffic on new version"
+  #         echo ""
+  #         echo "🎉 Blue-Green deployment successful!"
