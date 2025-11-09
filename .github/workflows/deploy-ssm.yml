@@ -1,3 +1,5 @@
+
+
 name: Single Instance Blue-Green Deployment
 
 on:
@@ -19,17 +21,22 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       image_tag: ${{ steps.set_tag.outputs.tag }}
-    steps:
-      - uses: actions/checkout@v3
 
-      - id: set_tag
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set image tag
+        id: set_tag
         run: |
           SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
           echo "tag=v${{ github.run_number }}-${SHORT_SHA}" >> $GITHUB_OUTPUT
 
-      - uses: docker/setup-buildx-action@v2
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
 
-      - uses: docker/login-action@v2
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
@@ -76,6 +83,8 @@ jobs:
           aws s3 cp docker-compose.yml s3://${{ secrets.DEPLOYMENT_BUCKET }}/deployments/${{ steps.set_tag.outputs.tag }}/
           aws s3 cp nginx-config/ s3://${{ secrets.DEPLOYMENT_BUCKET }}/deployments/${{ steps.set_tag.outputs.tag }}/nginx-config/ --recursive
           aws s3 cp deployment/ s3://${{ secrets.DEPLOYMENT_BUCKET }}/deployments/${{ steps.set_tag.outputs.tag }}/deployment/ --recursive
+
+          echo "✅ Deployment files uploaded to S3"
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -87,15 +96,20 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       green_instance_id: ${{ steps.launch.outputs.instance_id }}
+
     steps:
-      - uses: aws-actions/configure-aws-credentials@v2
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - id: launch
+      - name: Launch single green instance
+        id: launch
         run: |
+          echo "Launching new green instance..."
+
           INSTANCE_ID=$(aws ec2 run-instances \
             --launch-template LaunchTemplateId=${{ env.LAUNCH_TEMPLATE_ID }} \
             --count 1 \
@@ -105,20 +119,47 @@ jobs:
               {Key=Version,Value=${{ needs.build.outputs.image_tag }}},
               {Key=Name,Value=quotes-app-green}
             ]" \
-            --query 'Instances[0].InstanceId' --output text)
+            --query 'Instances[0].InstanceId' \
+            --output text)
 
           echo "instance_id=$INSTANCE_ID" >> $GITHUB_OUTPUT
+          echo "✅ Launched green instance: $INSTANCE_ID"
 
-      - run: |
+      - name: Wait for instance to be ready
+        run: |
+          echo "Waiting for instance to be running..."
           aws ec2 wait instance-running --instance-ids ${{ steps.launch.outputs.instance_id }}
+
+          echo "Instance is running. Waiting for initialization to complete..."
           sleep 150
- 
+
+          echo "Checking SSM agent status..."
+          for i in {1..30}; do
+            STATUS=$(aws ssm describe-instance-information \
+              --instance-information-filter-list "key=InstanceIds,valueSet=${{ steps.launch.outputs.instance_id }}" \
+              --query 'InstanceInformationList[0].PingStatus' \
+              --output text 2>/dev/null || echo "Offline")
+
+            echo "Attempt $i/30 - SSM Agent Status: $STATUS"
+
+            if [ "$STATUS" = "Online" ]; then
+              echo "✅ SSM agent is online and ready"
+              exit 0
+            fi
+
+            sleep 10
+          done
+
+          echo "⚠️ SSM agent status check timed out, but continuing..."
+
   deploy:
     name: Deploy Application to Green
-    needs: provision-green
+    needs: [build, provision-green]
     runs-on: ubuntu-latest
+
     steps:
-      - uses: aws-actions/configure-aws-credentials@v2
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -160,7 +201,9 @@ jobs:
               "bash deployment/deploy.sh ${{ secrets.DOCKER_USERNAME }} ${{ needs.build.outputs.image_tag }} ${{ secrets.DOCKER_PASSWORD }} green",
               "",
               "echo \"=== Deployment Finished at $(date) ===\""
-            ]' --query 'Command.CommandId' --output text)
+            ]' \
+            --query 'Command.CommandId' \
+            --output text)
 
           echo "Command ID: $COMMAND_ID"
           echo "Polling deployment status (max 15 minutes)..."
@@ -170,7 +213,12 @@ jobs:
 
           while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
             ATTEMPT=$((ATTEMPT + 1))
-            RESULT=$(aws ssm get-command-invocation --command-id "$COMMAND_ID" --instance-id "${{ needs.provision-green.outputs.green_instance_id }}" --region ${{ env.AWS_REGION }} 2>/dev/null || echo '{"Status":"Pending"}')
+
+            RESULT=$(aws ssm get-command-invocation \
+              --command-id "$COMMAND_ID" \
+              --instance-id "${{ needs.provision-green.outputs.green_instance_id }}" \
+              --region ${{ env.AWS_REGION }} 2>/dev/null || echo '{"Status":"Pending"}')
+
             STATUS=$(echo "$RESULT" | jq -r '.Status')
             echo "Attempt $ATTEMPT/$MAX_ATTEMPTS - Status: $STATUS - Time: $(date +%H:%M:%S)"
 
@@ -200,51 +248,206 @@ jobs:
 
           echo ""
           echo "❌ Deployment timeout after 15 minutes"
-          RESULT=$(aws ssm get-command-invocation --command-id "$COMMAND_ID" --instance-id "${{ needs.provision-green.outputs.green_instance_id }}" --region ${{ env.AWS_REGION }})
+          RESULT=$(aws ssm get-command-invocation \
+            --command-id "$COMMAND_ID" \
+            --instance-id "${{ needs.provision-green.outputs.green_instance_id }}" \
+            --region ${{ env.AWS_REGION }})
           echo "$RESULT" | jq -r '.StandardOutputContent'
           exit 1
 
-  register-green:
-    name: Register Green and Wait for Healthy Status
-    needs: deploy
+  health-check:
+    name: Health Check Green Instance
+    needs: [build, provision-green, deploy]
     runs-on: ubuntu-latest
+
     steps:
-      - uses: aws-actions/configure-aws-credentials@v2
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Register green instance to target group and wait for healthy
+      - name: Run health check
         run: |
-          aws elbv2 register-targets --target-group-arn ${{ env.GREEN_TG_ARN }} --targets Id=${{ needs.provision-green.outputs.green_instance_id }}
+          echo "=== Running health check ==="
 
-          MAX_ATTEMPTS=40
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "${{ needs.provision-green.outputs.green_instance_id }}" \
+            --document-name "AWS-RunShellScript" \
+            --comment "Health check for ${{ needs.build.outputs.image_tag }}" \
+            --parameters 'commands=[
+              "cd /home/ubuntu/quotes-app",
+              "bash deployment/health_check.sh"
+            ]' \
+            --timeout-seconds 300 \
+            --query 'Command.CommandId' \
+            --output text)
+
+          echo "Health check command ID: $COMMAND_ID"
+
+          MAX_ATTEMPTS=30
           ATTEMPT=0
 
           while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
             ATTEMPT=$((ATTEMPT + 1))
-            HEALTH_INFO=$(aws elbv2 describe-target-health --target-group-arn ${{ env.GREEN_TG_ARN }} --targets Id=${{ needs.provision-green.outputs.green_instance_id }} 2>/dev/null || echo '{"TargetHealthDescriptions":[{"TargetHealth":{"State":"unknown"}}]}')
-            STATE=$(echo "$HEALTH_INFO" | jq -r '.TargetHealthDescriptions[0].TargetHealth.State // "unknown"')
 
-            if [ "$STATE" = "healthy" ] || [ "$STATE" = "unused" ]; then
-              echo "✅ Target is healthy or unused, ready for traffic."
+            RESULT=$(aws ssm get-command-invocation \
+              --command-id "$COMMAND_ID" \
+              --instance-id "${{ needs.provision-green.outputs.green_instance_id }}" \
+              --region ${{ env.AWS_REGION }} 2>/dev/null || echo '{"Status":"Pending"}')
+
+            STATUS=$(echo "$RESULT" | jq -r '.Status')
+            echo "Attempt $ATTEMPT/$MAX_ATTEMPTS - Health Check Status: $STATUS"
+
+            if [ "$STATUS" = "Success" ]; then
+              echo ""
+              echo "✅ Health check passed!"
+              echo ""
+              echo "$RESULT" | jq -r '.StandardOutputContent'
               exit 0
             fi
 
-            echo "Waiting for healthy target, current state: $STATE"
+            if [ "$STATUS" = "Failed" ] || [ "$STATUS" = "TimedOut" ]; then
+              echo ""
+              echo "❌ Health check failed!"
+              echo ""
+              echo "$RESULT" | jq -r '.StandardOutputContent'
+              echo "$RESULT" | jq -r '.StandardErrorContent'
+              exit 1
+            fi
+
+            sleep 10
+          done
+
+          echo "❌ Health check timeout"
+          exit 1
+
+  register-green:
+    name: Register Green and Wait for Healthy Status
+    needs: [provision-green, health-check]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Register to green target group
+        run: |
+          echo "Registering green instance to target group..."
+
+          aws elbv2 register-targets \
+            --target-group-arn ${{ env.GREEN_TG_ARN }} \
+            --targets Id=${{ needs.provision-green.outputs.green_instance_id }}
+
+          echo "✅ Instance registered to green target group"
+          echo ""
+
+      - name: Wait for target to become healthy
+        run: |
+          echo "============================================"
+          echo "Waiting for Target to Become HEALTHY"
+          echo "============================================"
+          echo ""
+          echo "This ensures no 503 errors when canary traffic starts."
+          echo "The application must be fully ready before routing traffic."
+          echo ""
+
+          MAX_ATTEMPTS=40  # 20 minutes max (40 * 30 seconds)
+          ATTEMPT=0
+          LAST_STATE=""
+          LAST_REASON=""
+
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+
+            HEALTH_INFO=$(aws elbv2 describe-target-health \
+              --target-group-arn ${{ env.GREEN_TG_ARN }} \
+              --targets Id=${{ needs.provision-green.outputs.green_instance_id }} \
+              2>/dev/null || echo '{"TargetHealthDescriptions":[{"TargetHealth":{"State":"unknown"}}]}')
+
+            STATE=$(echo "$HEALTH_INFO" | jq -r '.TargetHealthDescriptions[0].TargetHealth.State // "unknown"')
+            REASON=$(echo "$HEALTH_INFO" | jq -r '.TargetHealthDescriptions[0].TargetHealth.Reason // "none"')
+            DESCRIPTION=$(echo "$HEALTH_INFO" | jq -r '.TargetHealthDescriptions[0].TargetHealth.Description // ""')
+
+
+            # Only log if state changed
+            if [ "$STATE" != "$LAST_STATE" ] || [ "$REASON" != "$LAST_REASON" ]; then
+              echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+              echo "Attempt $ATTEMPT/$MAX_ATTEMPTS - $(date +%H:%M:%S)"
+              echo "State: $STATE"
+              echo "Reason: $REASON"
+              if [ -n "$DESCRIPTION" ]; then
+                echo "Description: $DESCRIPTION"
+              fi
+              echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+              echo ""
+              LAST_STATE="$STATE"
+              LAST_REASON="$REASON"
+            else
+              echo "[$ATTEMPT/$MAX_ATTEMPTS] Status: $STATE - $(date +%H:%M:%S)"
+            fi
+
+            # Success condition: consider "healthy" or "unused" as pass here
+            if [ "$STATE" = "healthy" ] || [ "$STATE" = "unused" ]; then
+              echo ""
+              echo "╔════════════════════════════════════════╗"
+              echo "║  ✅ TARGET IS HEALTHY OR UNUSED - READY! ║"
+              echo "╚════════════════════════════════════════╝"
+              echo ""
+              echo "✓ Application fully started or target unused meaning no traffic yet"
+              echo "✓ It's safe to proceed with routing traffic"
+              echo ""
+              exit 0
+            fi
+
+            # Check for persistent unhealthy state
+            if [ "$STATE" = "unhealthy" ]; then
+              if [ $ATTEMPT -ge 20 ]; then
+                echo ""
+                echo "❌ Target remains UNHEALTHY after $ATTEMPT attempts"
+                echo ""
+                echo "Common causes:"
+                echo "  • Application not listening on correct port"
+                echo "  • Health check path returning non-200 status"
+                echo "  • Security group blocking ALB health checks"
+                echo "  • Application crashed or failed to start"
+                echo ""
+                echo "Full health check details:"
+                echo "$HEALTH_INFO" | jq '.TargetHealthDescriptions[0]'
+                exit 1
+              fi
+            fi
+
+            # Allow initial and draining states
+            if [ "$STATE" != "initial" ] && [ "$STATE" != "healthy" ] && [ "$STATE" != "unhealthy" ] && [ "$STATE" != "unused" ]; then
+              echo "⚠️  Unexpected state: $STATE"
+            fi
+
             sleep 30
           done
 
-          echo "❌ Timeout: Target did not become healthy"
+          echo ""
+          echo "❌ TIMEOUT: Target did not become healthy within 20 minutes"
+          echo ""
+          echo "Final status:"
+          aws elbv2 describe-target-health \
+            --target-group-arn ${{ env.GREEN_TG_ARN }} \
+            --targets Id=${{ needs.provision-green.outputs.green_instance_id }} | jq '.'
           exit 1
 
   configure-canary:
     name: Configure 20% Canary Traffic
-    needs: register-green
+    needs: [provision-green, register-green]
     runs-on: ubuntu-latest
+
     steps:
-      - uses: aws-actions/configure-aws-credentials@v2
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -252,6 +455,13 @@ jobs:
 
       - name: Set 80% Blue / 20% Green traffic split
         run: |
+          echo "============================================"
+          echo "Configuring Canary Traffic Split"
+          echo "============================================"
+          echo "Green instance is HEALTHY and ready."
+          echo "Now routing 20% traffic for testing..."
+          echo ""
+
           aws elbv2 modify-listener \
             --listener-arn ${{ env.ALB_LISTENER_ARN }} \
             --default-actions Type=forward,ForwardConfig="{
@@ -259,51 +469,160 @@ jobs:
                 {TargetGroupArn=${{ env.BLUE_TG_ARN }},Weight=80},
                 {TargetGroupArn=${{ env.GREEN_TG_ARN }},Weight=20}
               ],
-              TargetGroupStickinessConfig={Enabled:false}
+              TargetGroupStickinessConfig={Enabled=false}
             }"
+
+          echo ""
+          echo "✅ Traffic Distribution Configured:"
+          echo "   - Blue (current): 80%"
+          echo "   - Green (new): 20%"
+          echo ""
+          echo "🧪 Green instance is now receiving 20% of traffic"
+          echo "💡 No 503 errors - target was healthy or unused before routing"
+          echo ""
 
   approve:
     name: QA Approval Gate
     needs: configure-canary
     runs-on: ubuntu-latest
     environment: production-approval
+
     steps:
-      - run: echo "Deployment paused for QA testing. Awaiting approval."
+      - name: Awaiting approval
+        run: |
+          echo "⏸️  Deployment paused for QA testing"
+          echo ""
+          echo "📊 Current State:"
+          echo "   - Blue: 1 instance (80% traffic)"
+          echo "   - Green: 1 instance (20% traffic)"
+          echo ""
+          echo "✅ Click 'Approve and run' to complete deployment (100% → Green)"
 
   complete-deployment:
     name: Complete Blue-Green Switch
-    needs: approve
+    needs: [provision-green, approve]
     runs-on: ubuntu-latest
+
     steps:
-      - uses: aws-actions/configure-aws-credentials@v2
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - id: blue
+      - name: Get blue instance ID
+        id: blue
         run: |
           BLUE_ID=$(aws ec2 describe-instances \
-            --filters "Name=tag:Environment,Values=blue" "Name=instance-state-name,Values=running" \
-            --query 'Reservations[0].Instances[0].InstanceId' --output text 2>/dev/null || echo "")
+            --filters \
+              "Name=tag:Environment,Values=blue" \
+              "Name=instance-state-name,Values=running" \
+            --query 'Reservations[0].Instances[0].InstanceId' \
+            --output text 2>/dev/null || echo "")
+
           echo "blue_id=$BLUE_ID" >> $GITHUB_OUTPUT
+
+          if [ -z "$BLUE_ID" ] || [ "$BLUE_ID" = "None" ]; then
+            echo "ℹ️  No blue instance found (this might be the first deployment)"
+          else
+            echo "Found blue instance: $BLUE_ID"
+          fi
 
       - name: Shift 100% traffic to green target group
         run: |
-          aws elbv2 modify-listener --listener-arn ${{ env.ALB_LISTENER_ARN }} --default-actions Type=forward,TargetGroupArn=${{ env.GREEN_TG_ARN }}
+          echo "Shifting 100% traffic to green target group..."
+          echo "Listener ARN: ${{ env.ALB_LISTENER_ARN }}"
 
-      - name: Deregister and terminate old blue instance
+          aws elbv2 modify-listener \
+            --listener-arn ${{ env.ALB_LISTENER_ARN }} \
+            --default-actions Type=forward,TargetGroupArn=${{ env.GREEN_TG_ARN }}
+
+          echo "✅ 100% traffic now routed to green target group"
+
+      - name: Deregister blue instance from blue target group
         if: steps.blue.outputs.blue_id != '' && steps.blue.outputs.blue_id != 'None'
         run: |
-          aws elbv2 deregister-targets --target-group-arn ${{ env.BLUE_TG_ARN }} --targets Id=${{ steps.blue.outputs.blue_id }}
+          echo "Deregistering blue instance from blue target group..."
+
+          aws elbv2 deregister-targets \
+            --target-group-arn ${{ env.BLUE_TG_ARN }} \
+            --targets Id=${{ steps.blue.outputs.blue_id }}
+
+          echo "✅ Blue instance deregistered from blue target group"
+          echo "Waiting for connection draining (30 seconds)..."
           sleep 30
+
+      - name: Terminate old blue instance
+        if: steps.blue.outputs.blue_id != '' && steps.blue.outputs.blue_id != 'None'
+        run: |
+          echo "Terminating old blue instance..."
           aws ec2 terminate-instances --instance-ids ${{ steps.blue.outputs.blue_id }}
 
-      - name: Promote green instance to blue target group
+          echo "✅ Old blue instance terminated: ${{ steps.blue.outputs.blue_id }}"
+
+      - name: Swap target groups - Promote green to blue
         run: |
-          aws ec2 create-tags --resources ${{ needs.provision-green.outputs.green_instance_id }} --tags Key=Environment,Value=blue Key=Name,Value=quotes-app-blue
-          aws elbv2 register-targets --target-group-arn ${{ env.BLUE_TG_ARN }} --targets Id=${{ needs.provision-green.outputs.green_instance_id }}
+          echo "============================================"
+          echo "Starting Target Group Swap Process"
+          echo "============================================"
+          echo ""
+
+          # Step 1: Update instance tags
+          echo "1️⃣ Promoting green instance to blue..."
+          aws ec2 create-tags \
+            --resources ${{ needs.provision-green.outputs.green_instance_id }} \
+            --tags \
+              Key=Environment,Value=blue \
+              Key=Name,Value=quotes-app-blue
+
+          echo "✅ Instance tags updated to 'blue'"
+          echo ""
+
+          # Step 2: Register to blue target group
+          echo "2️⃣ Registering instance to blue target group..."
+          aws elbv2 register-targets \
+            --target-group-arn ${{ env.BLUE_TG_ARN }} \
+            --targets Id=${{ needs.provision-green.outputs.green_instance_id }}
+
+          echo "✅ Instance registered to blue target group"
+          echo "   Waiting for registration to complete..."
           sleep 15
-          aws elbv2 modify-listener --listener-arn ${{ env.ALB_LISTENER_ARN }} --default-actions Type=forward,TargetGroupArn=${{ env.BLUE_TG_ARN }}
+          echo ""
+
+          # Step 3: Update listener to point to blue target group
+          echo "3️⃣ Switching listener to blue target group..."
+          aws elbv2 modify-listener \
+            --listener-arn ${{ env.ALB_LISTENER_ARN }} \
+            --default-actions Type=forward,TargetGroupArn=${{ env.BLUE_TG_ARN }}
+
+          echo "✅ Listener now points to blue target group"
+          echo "   Waiting for traffic to stabilize..."
           sleep 10
-          aws elbv2 deregister-targets --target-group-arn ${{ env.GREEN_TG_ARN }} --targets Id=${{ needs.provision-green.outputs.green_instance_id }}
+          echo ""
+
+          # Step 4: Deregister from green target group
+          echo "4️⃣ Deregistering instance from green target group..."
+          aws elbv2 deregister-targets \
+            --target-group-arn ${{ env.GREEN_TG_ARN }} \
+            --targets Id=${{ needs.provision-green.outputs.green_instance_id }}
+
+          echo "✅ Instance deregistered from green target group"
+          echo ""
+
+          echo "============================================"
+          echo "✅ TARGET GROUP SWAP COMPLETE!"
+          echo "============================================"
+          echo ""
+          echo "📊 Final Configuration:"
+          echo "   • Instance: ${{ needs.provision-green.outputs.green_instance_id }}"
+          echo "   • Tagged as: blue"
+          echo "   • Registered to: Blue Target Group"
+          echo "   • ALB Listener: Points to Blue TG (100% traffic)"
+          echo "   • Green TG: Empty (ready for next deployment)"
+          echo ""
+          echo "🔄 Next Deployment Will Use:"
+          echo "   • Blue TG → Current production (this version)"
+          echo "   • Green TG → New version (canary testing)"
+          echo ""
+          echo "🎉 Blue-Green deployment successful!"
