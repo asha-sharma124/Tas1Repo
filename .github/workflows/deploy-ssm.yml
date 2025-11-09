@@ -62,7 +62,7 @@ jobs:
           aws s3 cp docker-compose.yml s3://${{ secrets.DEPLOYMENT_BUCKET }}/deployments/${TAG}/
           aws s3 cp deployment/ s3://${{ secrets.DEPLOYMENT_BUCKET }}/deployments/${TAG}/deployment/ --recursive
 
-          echo "✅ Deployment files uploaded to S3"
+          echo "Deployment files uploaded to S3"
 
   provision-green:
     needs: build
@@ -81,7 +81,7 @@ jobs:
         id: launch
         run: |
           echo "Launching new green instance..."
-          INSTANCE_ID=$(aws ec2 run-instances  --launch-template LaunchTemplateId=${{ env.LAUNCH_TEMPLATE_ID }} -count 1 \
+          INSTANCE_ID=$(aws ec2 run-instances  --launch-template LaunchTemplateId=${{ env.LAUNCH_TEMPLATE_ID }} --count 1 \
             --subnet-id ${{ env.PRIVATE_SUBNET_ID }} \
             --tag-specifications "ResourceType=instance,Tags=[
               {Key=Name,Value=quotes-app-green}
