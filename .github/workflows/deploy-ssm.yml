@@ -44,7 +44,7 @@ jobs:
         run: |
           for service in db api app; do
             IMAGE_NAME="${{ secrets.DOCKER_USERNAME }}/quotes-${service}"
-            docker build --no-cache -t $IMAGE_NAME:${TAG} -t $IMAGE_NAME:latest ./$service
+            docker build --no-cache -t $IMAGE_NAME:${TAG} -t $IMAGE_NAME:latest ../$service
             docker push $IMAGE_NAME:${TAG}
             docker push $IMAGE_NAME:latest
           done
