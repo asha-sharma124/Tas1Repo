@@ -42,12 +42,7 @@ jobs:
           for SERVICE in db:quotes-db api:quotes-api app:quotes-frontend; do
             DIR=${SERVICE%%:*}
             NAME=${SERVICE##*:}
-            docker buildx build --push \
-              --cache-from type=registry,ref=$USER/$NAME:buildcache \
-              --cache-to type=registry,ref=$USER/$NAME:buildcache,mode=max \
-              -t $USER/$NAME:$TAG \
-              -t $USER/$NAME:latest \
-              ./$DIR
+            docker buildx build --push               --cache-from type=registry,ref=$USER/$NAME:buildcache               --cache-to type=registry,ref=$USER/$NAME:buildcache,mode=max               -t $USER/$NAME:$TAG               -t $USER/$NAME:latest               ./$DIR
           done
 
       - name: Prepare deployment files
@@ -85,11 +80,7 @@ jobs:
       - name: Launch green instance
         id: launch
         run: |
-          INSTANCE_ID=$(aws ec2 run-instances \
-            --launch-template LaunchTemplateId=${{ env.LAUNCH_TEMPLATE_ID }} \
-            --subnet-id ${{ env.PRIVATE_SUBNET_ID }} \
-            --tag-specifications "ResourceType=instance,Tags=[{Key=Environment,Value=green},{Key=Version,Value=${{ needs.build.outputs.image_tag }}},{Key=Name,Value=quotes-app-green}]" \
-            --query 'Instances[0].InstanceId' --output text)
+          INSTANCE_ID=$(aws ec2 run-instances             --launch-template LaunchTemplateId=${{ env.LAUNCH_TEMPLATE_ID }}             --subnet-id ${{ env.PRIVATE_SUBNET_ID }}             --tag-specifications "ResourceType=instance,Tags=[{Key=Environment,Value=green},{Key=Version,Value=${{ needs.build.outputs.image_tag }}},{Key=Name,Value=quotes-app-green}]"             --query 'Instances[0].InstanceId' --output text)
           echo "instance_id=$INSTANCE_ID" >> $GITHUB_OUTPUT
           echo "Launched: $INSTANCE_ID"
 
@@ -98,9 +89,7 @@ jobs:
           aws ec2 wait instance-running --instance-ids ${{ steps.launch.outputs.instance_id }}
           sleep 60
           for i in {1..20}; do
-            STATUS=$(aws ssm describe-instance-information \
-              --filters "Key=InstanceIds,Values=${{ steps.launch.outputs.instance_id }}" \
-              --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null || echo "Offline")
+            STATUS=$(aws ssm describe-instance-information               --filters "Key=InstanceIds,Values=${{ steps.launch.outputs.instance_id }}"               --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null || echo "Offline")
             [ "$STATUS" = "Online" ] && echo "SSM ready" && exit 0
             echo "Waiting for SSM ($i/20)..."
             sleep 10
@@ -130,29 +119,20 @@ jobs:
           TAG=${{ needs.build.outputs.image_tag }}
           tar czf deploy.tar.gz docker-compose.yml nginx-config deployment
           ENCODED=$(base64 -w 0 deploy.tar.gz)
-          COMMAND_ID=$(aws ssm send-command \
-            --instance-ids "$INSTANCE_ID" \
-            --document-name "AWS-RunShellScript" \
-            --comment "Deploy $TAG" \
-            --timeout-seconds 1800 \
-            --parameters commands="[
+          COMMAND_ID=$(aws ssm send-command             --instance-ids "$INSTANCE_ID"             --document-name "AWS-RunShellScript"             --comment "Deploy $TAG"             --timeout-seconds 1800             --parameters commands="[
               'set -ex',
               'mkdir -p /home/ubuntu/quotes-app && cd /home/ubuntu/quotes-app',
-              'echo \"$ENCODED\" | base64 -d | tar xzf -',
+              'echo "$ENCODED" | base64 -d | tar xzf -',
               'chmod +x deployment/*.sh',
               'bash deployment/deploy.sh ${{ secrets.DOCKER_USERNAME }} $TAG ${{ secrets.DOCKER_PASSWORD }} green'
-            ]" \
-            --query 'Command.CommandId' --output text)
+            ]"             --query 'Command.CommandId' --output text)
           echo "command_id=$COMMAND_ID" >> $GITHUB_ENV
 
       - name: Wait for deployment
         run: |
           INSTANCE_ID=${{ needs.provision-green.outputs.green_instance_id }}
           for i in {1..60}; do
-            STATUS=$(aws ssm get-command-invocation \
-              --command-id "${{ env.command_id }}" \
-              --instance-id "$INSTANCE_ID" \
-              --query 'Status' --output text 2>/dev/null || echo "Pending")
+            STATUS=$(aws ssm get-command-invocation               --command-id "${{ env.command_id }}"               --instance-id "$INSTANCE_ID"               --query 'Status' --output text 2>/dev/null || echo "Pending")
             echo "[$i/60] $STATUS"
             [ "$STATUS" = "Success" ] && echo "Deployment successful" && exit 0
             [[ "$STATUS" =~ ^(Failed|TimedOut|Cancelled)$ ]] && exit 1
@@ -175,16 +155,9 @@ jobs:
       - name: Run health check
         run: |
           INSTANCE_ID=${{ needs.provision-green.outputs.green_instance_id }}
-          COMMAND_ID=$(aws ssm send-command \
-            --instance-ids "$INSTANCE_ID" \
-            --document-name "AWS-RunShellScript" \
-            --parameters 'commands=["cd /home/ubuntu/quotes-app && bash deployment/health_check.sh"]' \
-            --query 'Command.CommandId' --output text)
+          COMMAND_ID=$(aws ssm send-command             --instance-ids "$INSTANCE_ID"             --document-name "AWS-RunShellScript"             --parameters 'commands=["cd /home/ubuntu/quotes-app && bash deployment/health_check.sh"]'             --query 'Command.CommandId' --output text)
           for i in {1..30}; do
-            STATUS=$(aws ssm get-command-invocation \
-              --command-id "$COMMAND_ID" \
-              --instance-id "$INSTANCE_ID" \
-              --query 'Status' --output text 2>/dev/null || echo "Pending")
+            STATUS=$(aws ssm get-command-invocation               --command-id "$COMMAND_ID"               --instance-id "$INSTANCE_ID"               --query 'Status' --output text 2>/dev/null || echo "Pending")
             [ "$STATUS" = "Success" ] && echo "Health check passed" && exit 0
             [[ "$STATUS" =~ ^(Failed|TimedOut)$ ]] && echo "Health check failed" && exit 1
             sleep 10
@@ -205,15 +178,10 @@ jobs:
       - name: Register and wait for healthy
         run: |
           INSTANCE_ID=${{ needs.provision-green.outputs.green_instance_id }}
-          aws elbv2 register-targets \
-            --target-group-arn ${{ env.GREEN_TG_ARN }} \
-            --targets Id=$INSTANCE_ID
+          aws elbv2 register-targets             --target-group-arn ${{ env.GREEN_TG_ARN }}             --targets Id=$INSTANCE_ID
           echo "Waiting for healthy status..."
           for i in {1..60}; do
-            STATE=$(aws elbv2 describe-target-health \
-              --target-group-arn ${{ env.GREEN_TG_ARN }} \
-              --targets Id=$INSTANCE_ID \
-              --query 'TargetHealthDescriptions[0].TargetHealth.State' --output text)
+            STATE=$(aws elbv2 describe-target-health               --target-group-arn ${{ env.GREEN_TG_ARN }}               --targets Id=$INSTANCE_ID               --query 'TargetHealthDescriptions[0].TargetHealth.State' --output text)
             echo "[$i/60] $STATE"
             [ "$STATE" = "healthy" ] && echo "Target healthy" && exit 0
             [ "$STATE" = "unhealthy" ] && [ $i -gt 30 ] && echo "Target unhealthy" && exit 1
@@ -234,9 +202,7 @@ jobs:
 
       - name: Configure traffic split
         run: |
-          aws elbv2 modify-listener \
-            --listener-arn ${{ env.ALB_LISTENER_ARN }} \
-            --default-actions Type=forward,ForwardConfig="{\"TargetGroups\":[{\"TargetGroupArn\":\"${{ env.BLUE_TG_ARN }}\",\"Weight\":80},{\"TargetGroupArn\":\"${{ env.GREEN_TG_ARN }}\",\"Weight\":20}]}"
+          aws elbv2 modify-listener             --listener-arn ${{ env.ALB_LISTENER_ARN }}             --default-actions Type=forward,ForwardConfig="{"TargetGroups":[{"TargetGroupArn":"${{ env.BLUE_TG_ARN }}","Weight":80},{"TargetGroupArn":"${{ env.GREEN_TG_ARN }}","Weight":20}]}"
           echo "Traffic: Blue 80%, Green 20%"
 
   approve:
@@ -263,44 +229,29 @@ jobs:
       - name: Get blue instance
         id: blue
         run: |
-          BLUE_ID=$(aws ec2 describe-instances \
-            --filters "Name=tag:Environment,Values=blue" "Name=instance-state-name,Values=running" \
-            --query 'Reservations[0].Instances[0].InstanceId' --output text 2>/dev/null || echo "")
+          BLUE_ID=$(aws ec2 describe-instances             --filters "Name=tag:Environment,Values=blue" "Name=instance-state-name,Values=running"             --query 'Reservations[0].Instances[0].InstanceId' --output text 2>/dev/null || echo "")
           echo "blue_id=$BLUE_ID" >> $GITHUB_OUTPUT
 
       - name: Route 100% to green
         run: |
-          aws elbv2 modify-listener \
-            --listener-arn ${{ env.ALB_LISTENER_ARN }} \
-            --default-actions Type=forward,TargetGroupArn=${{ env.GREEN_TG_ARN }}
+          aws elbv2 modify-listener             --listener-arn ${{ env.ALB_LISTENER_ARN }}             --default-actions Type=forward,TargetGroupArn=${{ env.GREEN_TG_ARN }}
           echo "Waiting for traffic to stabilize..."
           sleep 45
 
       - name: Cleanup blue instance
         if: steps.blue.outputs.blue_id != '' && steps.blue.outputs.blue_id != 'None'
         run: |
-          aws elbv2 deregister-targets \
-            --target-group-arn ${{ env.BLUE_TG_ARN }} \
-            --targets Id=${{ steps.blue.outputs.blue_id }}
+          aws elbv2 deregister-targets             --target-group-arn ${{ env.BLUE_TG_ARN }}             --targets Id=${{ steps.blue.outputs.blue_id }}
           sleep 60
-          aws ec2 terminate-instances --instance-ids ${{
-            steps.blue.outputs.blue_id }}
+          aws ec2 terminate-instances --instance-ids ${{ steps.blue.outputs.blue_id }}
 
       - name: Promote green to blue
         run: |
           INSTANCE_ID=${{ needs.provision-green.outputs.green_instance_id }}
-          aws ec2 create-tags \
-            --resources $INSTANCE_ID \
-            --tags Key=Environment,Value=blue Key=Name,Value=quotes-app-blue
-          aws elbv2 register-targets \
-            --target-group-arn ${{ env.BLUE_TG_ARN }} \
-            --targets Id=$INSTANCE_ID
+          aws ec2 create-tags             --resources $INSTANCE_ID             --tags Key=Environment,Value=blue Key=Name,Value=quotes-app-blue
+          aws elbv2 register-targets             --target-group-arn ${{ env.BLUE_TG_ARN }}             --targets Id=$INSTANCE_ID
           sleep 30
-          aws elbv2 modify-listener \
-            --listener-arn ${{ env.ALB_LISTENER_ARN }} \
-            --default-actions Type=forward,TargetGroupArn=${{ env.BLUE_TG_ARN }}
+          aws elbv2 modify-listener             --listener-arn ${{ env.ALB_LISTENER_ARN }}             --default-actions Type=forward,TargetGroupArn=${{ env.BLUE_TG_ARN }}
           sleep 15
-          aws elbv2 deregister-targets \
-            --target-group-arn ${{ env.GREEN_TG_ARN }} \
-            --targets Id=$INSTANCE_ID
+          aws elbv2 deregister-targets             --target-group-arn ${{ env.GREEN_TG_ARN }}             --targets Id=$INSTANCE_ID
           echo "Deployment complete"
