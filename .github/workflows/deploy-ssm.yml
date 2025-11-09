@@ -99,6 +99,7 @@ jobs:
           echo "Instance is running. Waiting for initialization to complete..."
           sleep 150
 
+
           echo "Checking SSM agent status..."
           for i in {1..30}; do
             STATUS=$(aws ssm describe-instance-information \
@@ -144,7 +145,6 @@ jobs:
               "cd /home/ubuntu/quotes-app",
               "echo \"Downloading files from S3...\"",
               "aws s3 cp s3://${{ secrets.DEPLOYMENT_BUCKET }}/deployments/${{ needs.build.outputs.image_tag }}/docker-compose.yml .",
-              "aws s3 cp s3://${{ secrets.DEPLOYMENT_BUCKET }}/deployments/${{ needs.build.outputs.image_tag }}/nginx-config/ ./nginx-config/ --recursive",
               "aws s3 cp s3://${{ secrets.DEPLOYMENT_BUCKET }}/deployments/${{ needs.build.outputs.image_tag }}/deployment/ ./deployment/ --recursive",
               "chmod +x deployment/*.sh",
               "echo \"Starting deployment script...\"",
