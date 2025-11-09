@@ -166,12 +166,13 @@ jobs:
           )
 
           COMMAND_ID=$(aws ssm send-command \
-            --instance-ids "$INSTANCE_ID" \
-            --document-name "AWS-RunShellScript" \
-            --comment "Deploy quotes app ${TAG}" \
-            --parameters "commands=$CMD" \
-            --query 'Command.CommandId' \
-            --output text)
+          --instance-ids "$INSTANCE_ID" \
+          --document-name "AWS-RunShellScript" \
+          --comment "Deploy quotes app ${TAG}" \
+          --parameters "commands=$(echo "$CMD" | jq -Rs .)" \
+          --query 'Command.CommandId' \
+          --output text)
+
 
           echo "📦 Command ID: $COMMAND_ID"
 
