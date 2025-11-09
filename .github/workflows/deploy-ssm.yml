@@ -115,6 +115,7 @@ jobs:
       #     done
 
   
+  
   deploy:
     name: Deploy Application to Green
     needs: [build, provision-green]
@@ -217,6 +218,7 @@ jobs:
             --region ${{ env.AWS_REGION }})
           echo "$RESULT" | jq -r '.StandardOutputContent'
           exit 1
+
 
 
   register-green:
