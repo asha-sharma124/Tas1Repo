@@ -11,3 +11,4 @@ EXPOSE 5002
 # 5002 this is for local dev
 
 CMD ["python", "app.py"]
+

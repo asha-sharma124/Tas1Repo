@@ -100,6 +100,7 @@ jobs:
           sleep 150
 
 
+
           echo "Checking SSM agent status..."
           for i in {1..30}; do
             STATUS=$(aws ssm describe-instance-information \
