@@ -62,7 +62,7 @@ jobs:
           aws s3 cp docker-compose.yml s3://${{ secrets.DEPLOYMENT_BUCKET }}/deployments/${TAG}/
           aws s3 cp deployment/ s3://${{ secrets.DEPLOYMENT_BUCKET }}/deployments/${TAG}/deployment/ --recursive
 
-          echo "✅ Deployment files uploaded to S3"
+          echo " Deployment files uploaded to S3"
 
   provision-green:
     needs: build
@@ -108,13 +108,13 @@ jobs:
               --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null || echo "Offline")
             echo "Attempt $i/30 - SSM Agent Status: $STATUS"
             if [ "$STATUS" = "Online" ]; then
-              echo "✅ SSM agent is online and ready"
+              echo " SSM agent is online and ready"
               exit 0
             fi
             sleep 10
           done
 
-          echo "⚠️ SSM agent status check timed out, but continuing..."
+          echo " SSM agent status check timed out, but continuing..."
 
   deploy:
     needs: [build, provision-green]

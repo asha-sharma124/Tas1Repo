@@ -2,6 +2,7 @@
 
 services:
   db:
+    container_name: quotes-db
     build: ./db
     # image: mysql:5.7  # It's better to use a pre-built image for databases
     environment:
@@ -12,6 +13,7 @@ services:
     # Removed volumes configuration as EB doesn't support named volumes
 
   api:
+    container_name: quotes-api
     build: ./api
     depends_on:
       - db
@@ -23,12 +25,13 @@ services:
     # Removed ports configuration; EB handles port binding
 
   app:
+    container_name: quotes-frontend
     build: ./app
     depends_on:
       - api
     # Changed to map to port 80, which is what the EB load balancer will expect for HTTP traffic
     ports:
-      - 5002:5002  # Assuming your app.py is set to listen on port 5002
+      - 80:5002  # Assuming your app.py is set to listen on port 5002
 
 # Removed volumes section
 
