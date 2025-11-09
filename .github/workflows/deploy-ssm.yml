@@ -97,24 +97,9 @@ jobs:
           aws ec2 wait instance-running --instance-ids ${{ steps.launch.outputs.instance_id }}
 
           echo "Instance is running. Waiting for initialization to complete..."
-          sleep 150
+          sleep 200
 
 
-
-          echo "Checking SSM agent status..."
-          for i in {1..30}; do
-            STATUS=$(aws ssm describe-instance-information \
-              --instance-information-filter-list "key=InstanceIds,valueSet=${{ steps.launch.outputs.instance_id }}" \
-              --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null || echo "Offline")
-            echo "Attempt $i/30 - SSM Agent Status: $STATUS"
-            if [ "$STATUS" = "Online" ]; then
-              echo " SSM agent is online and ready"
-              exit 0
-            fi
-            sleep 10
-          done
-
-          echo " SSM agent status check timed out, but continuing..."
 
   deploy:
     needs: [build, provision-green]
@@ -172,26 +157,7 @@ jobs:
         run: |
           aws elbv2 register-targets --target-group-arn ${{ env.GREEN_TG_ARN }} --targets Id=${{ needs.provision-green.outputs.green_instance_id }}
 
-          MAX_ATTEMPTS=40
-          ATTEMPT=0
-
-          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-            ATTEMPT=$((ATTEMPT + 1))
-            HEALTH_INFO=$(aws elbv2 describe-target-health --target-group-arn ${{ env.GREEN_TG_ARN }} --targets Id=${{ needs.provision-green.outputs.green_instance_id }} 2>/dev/null || echo '{"TargetHealthDescriptions":[{"TargetHealth":{"State":"unknown"}}]}')
-            STATE=$(echo "$HEALTH_INFO" | jq -r '.TargetHealthDescriptions[0].TargetHealth.State // "unknown"')
-
-            if [ "$STATE" = "healthy" ] || [ "$STATE" = "unused" ]; then
-              exit 0
-            fi
-
-            if [ "$STATE" = "unhealthy" ] && [ $ATTEMPT -ge 20 ]; then
-              exit 1
-            fi
-
-            sleep 30
-          done
-
-          exit 1
+          sleep 100
 
 
   configure-canary:
@@ -207,8 +173,7 @@ jobs:
 
       - name: Set traffic split to 80% Blue, 20% Green
         run: |
-          aws elbv2 modify-listener \
-            --listener-arn ${{ env.ALB_LISTENER_ARN }} \
+          aws elbv2 modify-listener  --listener-arn ${{ env.ALB_LISTENER_ARN }} \
             --default-actions Type=forward,ForwardConfig="{
               TargetGroups=[
                 {TargetGroupArn=${{ env.BLUE_TG_ARN }},Weight=80},
