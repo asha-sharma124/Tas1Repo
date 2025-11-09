@@ -57,7 +57,7 @@ jobs:
         run: |
           sed -i "s|build: ./db|image: ${{ secrets.DOCKER_USERNAME }}/quotes-db:${TAG}|g" docker-compose.yml
           sed -i "s|build: ./api|image: ${{ secrets.DOCKER_USERNAME }}/quotes-api:${TAG}|g" docker-compose.yml
-          sed -i "s|build: ./app|image: ${{ secrets.DOCKER_USERNAME }}/quotes-frontend:${TAG}|g" docker-compose.yml
+          sed -i "s|build: ./app|image: ${{ secrets.DOCKER_USERNAME }}/quotes-app:${TAG}|g" docker-compose.yml
 
           aws s3 cp docker-compose.yml s3://${{ secrets.DEPLOYMENT_BUCKET }}/deployments/${TAG}/
           aws s3 cp deployment/ s3://${{ secrets.DEPLOYMENT_BUCKET }}/deployments/${TAG}/deployment/ --recursive
@@ -154,7 +154,7 @@ jobs:
             --query 'Command.CommandId' \
             --output text)
           echo "Sent SSM command with Command ID: $COMMAND_ID"
-          sleep 300
+          sleep 200
 
 
   register-green:
