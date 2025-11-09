@@ -217,6 +217,11 @@ echo "Cleaning up resources..."
 docker container prune -f || true
 docker image prune -af --filter "until=24h" || true
 docker rm -f quotes-app-app-1
+if sudo lsof -i :80 >/dev/null; then
+  echo "Port 80 is in use. Stopping nginx to free port..."
+  sudo systemctl stop nginx || true
+fi
+
 cat > $APP_DIR/.env << EOF
 DOCKER_USERNAME=${DOCKER_USERNAME}
 IMAGE_TAG=${IMAGE_TAG}
