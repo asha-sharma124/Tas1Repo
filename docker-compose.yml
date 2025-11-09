@@ -38,47 +38,10 @@
 # ==== For Development works ======
 
 
-# services:
-#   db:
-#     container_name: quotes-db
-#   #    build: ./db
-#     image: asha515/quotes-db:latest
-#     environment:
-#       MYSQL_ROOT_PASSWORD: root
-#       MYSQL_DATABASE: quotesdb
-#       MYSQL_USER: user
-#       MYSQL_PASSWORD: password
-#     volumes:
-#       - db-data:/var/lib/mysql
-
-#   api:
-#     container_name: quotes-api
-#     #build: ./api
-#     image: asha515/quotes-api:latest
-#     depends_on:
-#       - db
-#     environment:
-#       MYSQL_HOST: db
-#       MYSQL_USER: user
-#       MYSQL_PASSWORD: password
-#       MYSQL_DB: quotesdb
-#     ports:
-#       - "5001:5001"
-
-#   app:
-#     container_name: quotes-frontend
-#     image: asha515/quotes-frontend:latest
-#     depends_on:
-#       - api
-#     ports:
-#       # - "80:5000" # for beanstalk
-#       - "5002:5002"
-
-# volumes:
-#   db-data:
 services:
   db:
     container_name: quotes-db
+  #    build: ./db
     image: asha515/quotes-db:${IMAGE_TAG:-latest}
     environment:
       MYSQL_ROOT_PASSWORD: root
@@ -87,19 +50,13 @@ services:
       MYSQL_PASSWORD: password
     volumes:
       - db-data:/var/lib/mysql
-    healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
 
   api:
     container_name: quotes-api
+    #build: ./api
     image: asha515/quotes-api:${IMAGE_TAG:-latest}
     depends_on:
-      db:
-        condition: service_healthy
+      - db
     environment:
       MYSQL_HOST: db
       MYSQL_USER: user
@@ -107,29 +64,72 @@ services:
       MYSQL_DB: quotesdb
     ports:
       - "5001:5001"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5001/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
 
   app:
     container_name: quotes-frontend
     image: asha515/quotes-frontend:${IMAGE_TAG:-latest}
     depends_on:
-      api:
-        condition: service_healthy
+      - api
     ports:
+      # - "80:5000" # for beanstalk
       - "5002:5002"
-    environment:
-      - CACHE_BUST=${IMAGE_TAG:-latest}
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5002/"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 20s
 
 volumes:
   db-data:
+# services:
+#   db:
+#     container_name: quotes-db
+#     image: asha515/quotes-db:${IMAGE_TAG:-latest}
+#     environment:
+#       MYSQL_ROOT_PASSWORD: root
+#       MYSQL_DATABASE: quotesdb
+#       MYSQL_USER: user
+#       MYSQL_PASSWORD: password
+#     volumes:
+#       - db-data:/var/lib/mysql
+#     # healthcheck:
+#     #   test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+#     #   interval: 10s
+#     #   timeout: 5s
+#     #   retries: 5
+#     #   start_period: 30s
+
+#   api:
+#     container_name: quotes-api
+#     image: asha515/quotes-api:${IMAGE_TAG:-latest}
+#     depends_on:
+#       db:
+#         condition: service_healthy
+#     environment:
+#       MYSQL_HOST: db
+#       MYSQL_USER: user
+#       MYSQL_PASSWORD: password
+#       MYSQL_DB: quotesdb
+#     ports:
+#       - "5001:5001"
+#     healthcheck:
+#       test: ["CMD", "curl", "-f", "http://localhost:5001/health"]
+#       interval: 10s
+#       timeout: 5s
+#       retries: 5
+#       start_period: 30s
+
+#   app:
+#     container_name: quotes-frontend
+#     image: asha515/quotes-frontend:${IMAGE_TAG:-latest}
+#     depends_on:
+#       api:
+#         condition: service_healthy
+#     ports:
+#       - "5002:5002"
+#     environment:
+#       - CACHE_BUST=${IMAGE_TAG:-latest}
+#     healthcheck:
+#       test: ["CMD", "curl", "-f", "http://localhost:5002/"]
+#       interval: 10s
+#       timeout: 5s
+#       retries: 5
+#       start_period: 20s
+
+# volumes:
+#   db-data:
