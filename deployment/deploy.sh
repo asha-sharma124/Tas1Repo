@@ -125,18 +125,18 @@ APP_DIR="/home/ubuntu/quotes-app"
 
 echo "Deploying $IMAGE_TAG ($DEPLOYMENT_ENV) at $(date)"
 
-cd $APP_DIR
+cd "$APP_DIR"
 
 echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
 
 echo "Stopping containers gracefully..."
-docker-compose down --timeout 30 2>/dev/null || true
+docker-compose down --timeout 30 || true
 
 echo "Cleaning up resources..."
 docker container prune -f || true
 docker image prune -af --filter "until=24h" || true
 
-cat > $APP_DIR/.env << EOF
+cat > "$APP_DIR/.env" <<EOF
 DOCKER_USERNAME=${DOCKER_USERNAME}
 IMAGE_TAG=${IMAGE_TAG}
 DEPLOYMENT_ENV=${DEPLOYMENT_ENV}
@@ -152,7 +152,7 @@ docker-compose up -d
 echo "Waiting for services to be ready..."
 sleep 20
 
-# Wait for API health check
+# Wait for API health check (port 5001 expected response 200 on /health)
 for i in {1..30}; do
     if curl -sf http://localhost:5001/health > /dev/null 2>&1; then
         echo "API ready"
@@ -162,7 +162,7 @@ for i in {1..30}; do
     sleep 2
 done
 
-# Wait for frontend health check
+# Wait for frontend health check (port 5002 expected response 200 on /)
 for i in {1..30}; do
     if curl -sf http://localhost:5002/ > /dev/null 2>&1; then
         echo "Frontend ready"
@@ -172,8 +172,8 @@ for i in {1..30}; do
     sleep 2
 done
 
-# Update nginx with cache busting headers
-cat > $APP_DIR/nginx-deployment.conf << EOF
+# Update nginx cache busting headers
+cat > "$APP_DIR/nginx-deployment.conf" <<EOF
 add_header X-Deployment-Environment "${DEPLOYMENT_ENV}" always;
 add_header X-App-Version "${IMAGE_TAG}" always;
 add_header X-Hostname "$(hostname)" always;
@@ -182,14 +182,16 @@ add_header Pragma "no-cache" always;
 add_header Expires "0" always;
 EOF
 
+# Ensure symlink to nginx config is correct
 if [ ! -L /etc/nginx/sites-enabled/quotes-app ]; then
-    sudo cp $APP_DIR/nginx-config/quotes-app.conf /etc/nginx/sites-available/quotes-app
+    sudo cp "$APP_DIR/nginx-config/quotes-app.conf" /etc/nginx/sites-available/quotes-app
     sudo ln -sf /etc/nginx/sites-available/quotes-app /etc/nginx/sites-enabled/quotes-app
     sudo rm -f /etc/nginx/sites-enabled/default
 fi
 
 echo "Reloading nginx..."
-sudo nginx -t && sudo systemctl reload nginx
+sudo nginx -t
+sudo systemctl reload nginx
 
 # ec
 # #!/bin/bash
