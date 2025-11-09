@@ -193,7 +193,7 @@
 # sudo nginx -t
 # sudo systemctl reload nginx
 
-ec
+
 #!/bin/bash
 set -e
 
