@@ -4,7 +4,7 @@ name: Single Instance Blue-Green Deployment
 on:
   push:
     branches: [main]
-  #workflow_dispatch:
+  # workflow_dispatch:
 env:
   AWS_REGION: ap-south-1
   BLUE_TG_ARN: ${{ secrets.BLUE_TARGET_GROUP_ARN }}
