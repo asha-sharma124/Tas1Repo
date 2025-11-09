@@ -4,7 +4,7 @@ name: Single Instance Blue-Green Deployment
 on:
   push:
     branches: [main]
-  workflow_dispatch:
+  #workflow_dispatch:
 
 env:
   AWS_REGION: ap-south-1
@@ -13,14 +13,6 @@ env:
   ALB_LISTENER_ARN: ${{ secrets.ALB_LISTENER_ARN }}
   LAUNCH_TEMPLATE_ID: ${{ secrets.LAUNCH_TEMPLATE_ID }}
   PRIVATE_SUBNET_ID: ${{ secrets.PRIVATE_SUBNET_ID }}
-
-jobs:
-  build:
-    name: Build and Push Docker Images
-
-on:
-  push:
-    branches: [ main ]
 
 jobs:
   build:
