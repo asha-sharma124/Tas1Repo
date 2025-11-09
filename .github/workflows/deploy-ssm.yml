@@ -26,7 +26,7 @@ jobs:
       - name: Set image tag
         id: set_tag
         run: |
-          TAG=latest
+          TAG=$(date +'%Y%m%d%H%M%S')
           echo "image_tag=$TAG" >> $GITHUB_OUTPUT
           echo "TAG=$TAG" >> $GITHUB_ENV
 
