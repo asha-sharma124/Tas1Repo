@@ -41,22 +41,22 @@ docker-compose up -d
 echo "Waiting for services to be ready..."
 sleep 20
 
-# API health check wait
-for i in {1..30}; do
-    if curl -sf http://localhost:5001/health > /dev/null 2>&1; then
-        echo "API ready"
-        break
-    fi
-    echo "Waiting for API ($i/30)..."
-    sleep 2
-done
+# # API health check wait
+# for i in {1..30}; do
+#     if curl -sf http://localhost:5001/health > /dev/null 2>&1; then
+#         echo "API ready"
+#         break
+#     fi
+#     echo "Waiting for API ($i/30)..."
+#     sleep 2
+# done
 
-# Frontend health check wait
-for i in {1..30}; do
-    if curl -sf http://localhost:5002/ > /dev/null 2>&1; then
-        echo "Frontend ready"
-        break
-    fi
-    echo "Waiting for frontend ($i/30)..."
-    sleep 2
-done
+# # Frontend health check wait
+# for i in {1..30}; do
+#     if curl -sf http://localhost:5002/ > /dev/null 2>&1; then
+#         echo "Frontend ready"
+#         break
+#     fi
+#     echo "Waiting for frontend ($i/30)..."
+#     sleep 2
+# done

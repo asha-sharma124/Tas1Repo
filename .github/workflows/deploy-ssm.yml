@@ -138,7 +138,7 @@ jobs:
             ]' \
             --query 'Command.CommandId' \
             --output text)
-          echo "Sent SSM command with Command ID: $COMMAND_ID"
+          
           sleep 200
 
 
@@ -157,7 +157,7 @@ jobs:
         run: |
           aws elbv2 register-targets --target-group-arn ${{ env.GREEN_TG_ARN }} --targets Id=${{ needs.provision-green.outputs.green_instance_id }}
 
-          sleep 100
+          sleep 150
 
 
   configure-canary:
@@ -181,6 +181,7 @@ jobs:
               ],
               TargetGroupStickinessConfig={Enabled=false}
             }"
+            sleep 10
 
   approve:
     needs: configure-canary
@@ -213,6 +214,7 @@ jobs:
       - name: Shift 100% traffic to green target group
         run: |
           aws elbv2 modify-listener --listener-arn ${{ env.ALB_LISTENER_ARN }} --default-actions Type=forward,TargetGroupArn=${{ env.GREEN_TG_ARN }}
+          sleep 20
 
       - name: Deregister and terminate old blue instance
         if: steps.blue-instance.outputs.blue_id != '' && steps.blue-instance.outputs.blue_id != 'None'
