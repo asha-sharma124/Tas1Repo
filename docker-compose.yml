@@ -22,7 +22,7 @@ services:
       - 5001:5001
 
   app:
-    container_name: quotes-frontend
+    container_name: quotes-app
     build: ./app
     depends_on:
       - api

@@ -18,14 +18,14 @@ docker-compose down
 docker container prune -f || true
 
 docker image prune -af --filter "until=24h" || true
-#docker rm -f quotes-app-app-1
+# #docker rm -f quotes-app-app-1
 
-cat > $APP_DIR/.env << EOF
-DOCKER_USERNAME=${DOCKER_USERNAME}
-IMAGE_TAG=${IMAGE_TAG}
-DEPLOYMENT_ENV=${DEPLOYMENT_ENV}
-TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-EOF
+# cat > $APP_DIR/.env << EOF
+# DOCKER_USERNAME=${DOCKER_USERNAME}
+# IMAGE_TAG=${IMAGE_TAG}
+# DEPLOYMENT_ENV=${DEPLOYMENT_ENV}
+# TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+# EOF
 
 docker-compose pull -q
 
