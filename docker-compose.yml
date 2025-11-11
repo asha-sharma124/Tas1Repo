@@ -18,6 +18,8 @@ services:
       MYSQL_USER: user
       MYSQL_PASSWORD: password
       MYSQL_DB: quotesdb
+    ports:
+      - 5001:5001
 
   app:
     container_name: quotes-frontend
