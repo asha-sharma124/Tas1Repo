@@ -61,7 +61,7 @@ jobs:
 
           aws s3 cp docker-compose.yml s3://${{ secrets.DEPLOYMENT_BUCKET }}/deployments/${TAG}/
           aws s3 cp deployment/ s3://${{ secrets.DEPLOYMENT_BUCKET }}/deployments/${TAG}/deployment/ --recursive
-          aws s3 cp nginx-config/quotes.conf s3://${{ secrets.DEPLOYMENT_BUCKET }}/deployments/${TAG}/deployment/ --recursive
+          aws s3 cp ./nginx-config/quotes.conf s3://${{ secrets.DEPLOYMENT_BUCKET }}/deployments/${TAG}/
 
           echo " Deployment files uploaded to S3"
 
