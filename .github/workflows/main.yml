@@ -1,0 +1,220 @@
+name: Production Blue-Green Rolling Deployment
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: ap-south-1
+  BLUE_TG_ARN: ${{ secrets.BLUE_TARGET_GROUP_ARN }}
+  GREEN_TG_ARN: ${{ secrets.GREEN_TARGET_GROUP_ARN }}
+  ALB_LISTENER_ARN: ${{ secrets.ALB_LISTENER_ARN }}
+  LAUNCH_TEMPLATE_ID: ${{ secrets.LAUNCH_TEMPLATE_ID }}
+  PRIVATE_SUBNET_ID: ${{ secrets.PRIVATE_SUBNET_ID }}
+  DEPLOYMENT_BUCKET: ${{ secrets.DEPLOYMENT_BUCKET }}
+  TOTAL_INSTANCES: 4
+  WAIT_MINUTES: 1
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.set_tag.outputs.image_tag }}
+      initial_blue_count: ${{ steps.count.outputs.blue_count }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set image tag
+        id: set_tag
+        run: |
+          TAG=$(date +'%Y%m%d%H%M%S')
+          echo "image_tag=$TAG" >> $GITHUB_OUTPUT
+         
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and push Docker images
+        run: |
+          TAG=${{ steps.set_tag.outputs.image_tag }}
+          echo "Building images with tag: $TAG"
+          
+          for service in db api app; do
+            IMAGE_NAME="${{ secrets.DOCKER_USERNAME }}/quotes-${service}"
+            echo "Building $service..."
+            docker build --no-cache -t $IMAGE_NAME:${TAG} -t $IMAGE_NAME:latest $GITHUB_WORKSPACE/$service
+            docker push $IMAGE_NAME:${TAG}
+            docker push $IMAGE_NAME:latest
+          done
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Upload deployment files to S3
+        run: |
+          TAG=${{ steps.set_tag.outputs.image_tag }}
+          
+          sed -i "s|build: ./db|image: ${{ secrets.DOCKER_USERNAME }}/quotes-db:${TAG}|g" docker-compose.yml
+          sed -i "s|build: ./api|image: ${{ secrets.DOCKER_USERNAME }}/quotes-api:${TAG}|g" docker-compose.yml
+          sed -i "s|build: ./app|image: ${{ secrets.DOCKER_USERNAME }}/quotes-app:${TAG}|g" docker-compose.yml
+
+          aws s3 cp docker-compose.yml s3://${DEPLOYMENT_BUCKET}/deployments/${TAG}/
+          aws s3 cp deployment/ s3://${DEPLOYMENT_BUCKET}/deployments/${TAG}/deployment/ --recursive
+          aws s3 cp ./nginx-config/quotes.conf s3://${DEPLOYMENT_BUCKET}/deployments/${TAG}/
+
+      - name: Count current blue instances
+        id: count
+        run: |
+          BLUE_COUNT=$(aws elbv2 describe-target-health \
+            --target-group-arn ${{ env.BLUE_TG_ARN }} \
+            --query 'length(TargetHealthDescriptions[])' \
+            --output text)
+          
+          echo "blue_count=${BLUE_COUNT:-0}" >> $GITHUB_OUTPUT
+          echo "Current blue instances in TG: ${BLUE_COUNT:-0}"
+
+  deploy-first:
+    needs: build
+    uses: ./.github/workflows/deploy-first-instance.yml
+    secrets: inherit
+    with:
+      image_tag: ${{ needs.build.outputs.image_tag }}
+      aws_region: ap-south-1
+      total_instances: 4
+
+  deploy-remaining:
+    needs: [build, deploy-first]
+    uses: ./.github/workflows/deploy-remaining-instances.yml
+    secrets: inherit
+    with:
+      image_tag: ${{ needs.build.outputs.image_tag }}
+      aws_region: ap-south-1
+      wait_minutes: 1
+
+  approve-deployment:
+    needs: deploy-remaining
+    runs-on: ubuntu-latest
+    environment: production-approval
+    steps:
+      - name: Approval gate
+        run: |
+          echo " All 4 instances deployed with new code"
+          echo " approval required for final cutover"
+
+  complete-deployment:
+    needs: [build, approve-deployment]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get all green instances from target group
+        id: green
+        run: |
+          GREEN_IDS=$(aws elbv2 describe-target-health \
+            --target-group-arn ${{ secrets.GREEN_TARGET_GROUP_ARN }} \
+            --query 'TargetHealthDescriptions[*].Target.Id' \
+            --output text)
+          
+          echo "green_ids=$GREEN_IDS" >> $GITHUB_OUTPUT
+          echo "✅ Green instances: $GREEN_IDS"
+
+      - name: Get all blue instances from target group
+        id: blue
+        run: |
+          BLUE_IDS=$(aws elbv2 describe-target-health \
+            --target-group-arn ${{ secrets.BLUE_TARGET_GROUP_ARN }} \
+            --query 'TargetHealthDescriptions[*].Target.Id' \
+            --output text)
+          
+          echo "blue_ids=$BLUE_IDS" >> $GITHUB_OUTPUT
+          echo "✅ Blue instances: $BLUE_IDS"
+
+      - name: Switch to 100% green traffic
+        run: |
+          echo "🔀 Shifting 100% traffic to green..."
+          
+          aws elbv2 modify-listener \
+            --listener-arn ${{ secrets.ALB_LISTENER_ARN }} \
+            --default-actions Type=forward,TargetGroupArn=${{ secrets.GREEN_TARGET_GROUP_ARN }}
+          sleep 20
+          echo "✅ 100% traffic on green"
+
+      - name: Terminate all remaining blue instances
+        if: steps.blue.outputs.blue_ids != ''
+        run: |
+          echo "🗑️ Terminating remaining blue instances..."
+          
+          for INSTANCE_ID in ${{ steps.blue.outputs.blue_ids }}; do
+            echo "Deregistering: $INSTANCE_ID"
+            aws elbv2 deregister-targets \
+              --target-group-arn ${{ secrets.BLUE_TARGET_GROUP_ARN }} \
+              --targets Id=$INSTANCE_ID || true
+          done
+          
+          sleep 30
+          
+          echo "Terminating instances..."
+          for INSTANCE_ID in ${{ steps.blue.outputs.blue_ids }}; do
+            aws ec2 terminate-instances --instance-ids $INSTANCE_ID
+            echo "Terminated: $INSTANCE_ID"
+          done
+
+      - name: Promote green to blue
+        run: |
+          echo "🔄 Promoting green instances to blue..."
+          
+          for INSTANCE_ID in ${{ steps.green.outputs.green_ids }}; do
+            aws ec2 create-tags \
+              --resources $INSTANCE_ID \
+              --tags Key=Environment,Value=blue
+            
+            aws elbv2 register-targets \
+              --target-group-arn ${{ secrets.BLUE_TARGET_GROUP_ARN }} \
+              --targets Id=$INSTANCE_ID
+            
+            echo "✅ Promoted: $INSTANCE_ID"
+          done
+
+      - name: Wait for all targets healthy in blue
+        run: |
+          echo "⏳ Waiting for all targets to be healthy in blue TG..."
+          sleep 20 
+
+      - name: Switch listener to blue
+        run: |
+          echo "🔀 Switching listener to blue target group..."
+          
+          aws elbv2 modify-listener \
+            --listener-arn ${{ secrets.ALB_LISTENER_ARN }} \
+            --default-actions Type=forward,TargetGroupArn=${{ secrets.BLUE_TARGET_GROUP_ARN }}
+          sleep 10
+          echo "✅ Listener now points to blue TG"
+
+      - name: Cleanup green target group
+        run: |
+          echo "🧹 Cleaning up green target group..."
+          
+          for INSTANCE_ID in ${{ steps.green.outputs.green_ids }}; do
+            aws elbv2 deregister-targets \
+              --target-group-arn ${{ secrets.GREEN_TARGET_GROUP_ARN }} \
+              --targets Id=$INSTANCE_ID || true
+          done
+
+      - name: Deployment summary
+        run: |
+          echo "✅ All instances running latest code in Blue TG"

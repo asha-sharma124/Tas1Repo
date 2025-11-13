@@ -1,0 +1,209 @@
+name: Deploy Remaining Instances
+
+on:
+  workflow_call:
+    inputs:
+      image_tag:
+        required: true
+        type: string
+      aws_region:
+        required: true
+        type: string
+      wait_minutes:
+        required: true
+        type: number
+
+jobs:
+
+  deploy:
+    runs-on: ubuntu-latest
+    strategy:
+      max-parallel: 1
+      matrix:
+        instance_number: [2, 3, 4]
+    steps:
+      - name: Wait before next deployment
+        run: |
+          echo "⏳ Waiting ${{ inputs.wait_minutes }} minutes before deploying instance ${{ matrix.instance_number }}..."
+          sleep $((${{ inputs.wait_minutes }} * 60))
+          echo "✅ Wait period complete"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Launch green instance
+        id: launch
+        run: |
+          echo "🚀 Launching Green Instance ${{ matrix.instance_number }}/4"
+          
+          INSTANCE_ID=$(aws ec2 run-instances \
+            --launch-template LaunchTemplateId=${{ secrets.LAUNCH_TEMPLATE_ID }} \
+            --count 1 \
+            --subnet-id ${{ secrets.PRIVATE_SUBNET_ID }} \
+            --tag-specifications "ResourceType=instance,Tags=[
+              {Key=Name,Value=quotes-app-green-${{ matrix.instance_number }}},
+              {Key=Environment,Value=green},
+              {Key=DeploymentBatch,Value=${{ inputs.image_tag }}},
+              {Key=InstanceNumber,Value=${{ matrix.instance_number }}}
+            ]" \
+            --query 'Instances[0].InstanceId' \
+            --output text)
+          
+          echo "instance_id=$INSTANCE_ID" >> $GITHUB_OUTPUT
+          echo "✅ Launched: $INSTANCE_ID"
+
+      - name: Wait for instance readiness
+        run: |
+          aws ec2 wait instance-running --instance-ids ${{ steps.launch.outputs.instance_id }}
+          aws ec2 wait instance-status-ok --instance-ids ${{ steps.launch.outputs.instance_id }}
+          sleep 20
+
+      - name: Deploy application
+        id: deploy
+        run: |
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "${{ steps.launch.outputs.instance_id }}" \
+            --document-name "AWS-RunShellScript" \
+            --comment "Deploy ${{ inputs.image_tag }} - Instance ${{ matrix.instance_number }}" \
+            --timeout-seconds 1800 \
+            --parameters 'commands=[
+              "#!/bin/bash",
+              "set -ex",
+              "sudo mkdir -p /home/ubuntu/quotes-app/deployment",
+              "sudo chown -R ubuntu:ubuntu /home/ubuntu/quotes-app",
+              "cd /home/ubuntu/quotes-app",
+              "aws s3 cp s3://${{ secrets.DEPLOYMENT_BUCKET }}/deployments/${{ inputs.image_tag }}/docker-compose.yml . --region ${{ inputs.aws_region }}",
+              "aws s3 cp s3://${{ secrets.DEPLOYMENT_BUCKET }}/deployments/${{ inputs.image_tag }}/deployment/ ./deployment/ --recursive --region ${{ inputs.aws_region }}",
+              "aws s3 cp s3://${{ secrets.DEPLOYMENT_BUCKET }}/deployments/${{ inputs.image_tag }}/quotes.conf . --region ${{ inputs.aws_region }}",
+              "chmod +x deployment/*.sh",
+              "bash deployment/deploy.sh ${{ secrets.DOCKER_USERNAME }} ${{ inputs.image_tag }} ${{ secrets.DOCKER_PASSWORD }} green"
+            ]' \
+            --query 'Command.CommandId' \
+            --output text)
+          
+          echo "command_id=$COMMAND_ID" >> $GITHUB_OUTPUT
+          aws ssm wait command-executed --command-id $COMMAND_ID --instance-id ${{ steps.launch.outputs.instance_id }}
+
+      - name: Application health check
+        run: |
+          echo "🏥 Checking application health on instance ${{ matrix.instance_number }}..."
+          
+          HEALTH_CMD=$(aws ssm send-command \
+            --instance-ids "${{ steps.launch.outputs.instance_id }}" \
+            --document-name "AWS-RunShellScript" \
+            --comment "Health check instance ${{ matrix.instance_number }}" \
+            --timeout-seconds 120 \
+            --parameters 'commands=[
+              "for i in {1..5}; do",
+              "  if curl -f -s http://localhost:80 > /dev/null 2>&1; then",
+              "    echo \"✅ Health check passed\"",
+              "    exit 0",
+              "  fi",
+              "  echo \"Retry $i/5...\"",
+              "  sleep 10",
+              "done",
+              "echo \"❌ Health check failed\"",
+              "exit 1"
+            ]' \
+            --query 'Command.CommandId' \
+            --output text)
+          
+          set +e
+          aws ssm wait command-executed --command-id $HEALTH_CMD --instance-id ${{ steps.launch.outputs.instance_id }}
+          EXIT_CODE=$?
+          set -e
+          
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "❌ Health check failed - terminating instance"
+            aws ec2 terminate-instances --instance-ids ${{ steps.launch.outputs.instance_id }}
+            echo "⚠️ Keeping corresponding blue instance active"
+            exit 1
+          fi
+          
+          echo "✅ Application is healthy on instance ${{ matrix.instance_number }}"
+
+      - name: Register to green target group
+        run: |
+          echo "✅ Registering instance ${{ matrix.instance_number }} to green TG..."
+          aws elbv2 register-targets \
+            --target-group-arn ${{ secrets.GREEN_TARGET_GROUP_ARN }} \
+            --targets Id=${{ steps.launch.outputs.instance_id }}
+
+      - name: Wait for health checks
+        run: |
+          echo "⏳ Waiting for health checks..."
+          aws elbv2 wait target-in-service \
+            --target-group-arn ${{ secrets.GREEN_TARGET_GROUP_ARN }} \
+            --targets Id=${{ steps.launch.outputs.instance_id }}
+          
+          echo "✅ Instance ${{ matrix.instance_number }} is healthy"
+
+      - name: Terminate one blue instance from target group
+        run: |
+          echo "🔄 Fetching instance from Blue Target Group..."
+          
+          BLUE_INSTANCE=$(aws elbv2 describe-target-health \
+            --target-group-arn ${{ secrets.BLUE_TARGET_GROUP_ARN }} \
+            --query 'TargetHealthDescriptions[0].Target.Id' \
+            --output text 2>/dev/null || echo "")
+          
+          if [ -n "$BLUE_INSTANCE" ] && [ "$BLUE_INSTANCE" != "None" ]; then
+            echo "Found blue instance: $BLUE_INSTANCE"
+            
+            echo "Deregistering from target group..."
+            aws elbv2 deregister-targets \
+              --target-group-arn ${{ secrets.BLUE_TARGET_GROUP_ARN }} \
+              --targets Id=$BLUE_INSTANCE
+            
+            sleep 30
+            
+            echo "Terminating instance: $BLUE_INSTANCE"
+            aws ec2 terminate-instances --instance-ids $BLUE_INSTANCE
+            
+            echo "✅ Blue instance terminated successfully"
+          else
+            echo "ℹ️ No instances found in Blue Target Group"
+          fi
+
+      - name: Update traffic distribution
+        run: |
+          echo "🔀 Calculating new traffic distribution..."
+          
+          BLUE_COUNT=$(aws elbv2 describe-target-health \
+            --target-group-arn ${{ secrets.BLUE_TARGET_GROUP_ARN }} \
+            --query 'length(TargetHealthDescriptions[?TargetHealth.State==`healthy` || TargetHealth.State==`initial`])' \
+            --output text)
+          
+          GREEN_COUNT=$(aws elbv2 describe-target-health \
+            --target-group-arn ${{ secrets.GREEN_TARGET_GROUP_ARN }} \
+            --query 'length(TargetHealthDescriptions[?TargetHealth.State==`healthy` || TargetHealth.State==`initial`])' \
+            --output text)
+          
+          TOTAL=$((BLUE_COUNT + GREEN_COUNT))
+          
+          if [ $TOTAL -eq 0 ]; then
+            echo "❌ No instances found!"
+            exit 1
+          fi
+          
+          BLUE_WEIGHT=$((BLUE_COUNT * 100 / TOTAL))
+          GREEN_WEIGHT=$((GREEN_COUNT * 100 / TOTAL))
+          
+          echo "📊 Blue: ${BLUE_WEIGHT}% ($BLUE_COUNT instances)"
+          echo "📊 Green: ${GREEN_WEIGHT}% ($GREEN_COUNT instances)"
+
+          aws elbv2 modify-listener \
+            --listener-arn ${{ secrets.ALB_LISTENER_ARN }} \
+            --default-actions Type=forward,ForwardConfig="{
+              TargetGroups=[
+                {TargetGroupArn=${{ secrets.BLUE_TARGET_GROUP_ARN }},Weight=$BLUE_WEIGHT},
+                {TargetGroupArn=${{ secrets.GREEN_TARGET_GROUP_ARN }},Weight=$GREEN_WEIGHT}
+              ],
+              TargetGroupStickinessConfig={Enabled=false}
+            }"
+          sleep 20
+          echo "✅ Traffic updated successfully"

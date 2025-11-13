@@ -1,0 +1,170 @@
+name: Deploy First Instance
+
+on:
+  workflow_call:
+    inputs:
+      image_tag:
+        required: true
+        type: string
+      aws_region:
+        required: true
+        type: string
+      total_instances:
+        required: true
+        type: number
+    outputs:
+      instance_id:
+        description: "ID of the deployed instance"
+        value: ${{ jobs.deploy.outputs.instance_id }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    outputs:
+      instance_id: ${{ steps.launch.outputs.instance_id }}
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Launch first green instance
+        id: launch
+        run: |
+          echo "🚀 Launching Green Instance 1/${{ inputs.total_instances }}"
+          
+          INSTANCE_ID=$(aws ec2 run-instances \
+            --launch-template LaunchTemplateId=${{ secrets.LAUNCH_TEMPLATE_ID }} \
+            --count 1 \
+            --subnet-id ${{ secrets.PRIVATE_SUBNET_ID }} \
+            --tag-specifications "ResourceType=instance,Tags=[
+              {Key=Name,Value=quotes-app-green-1},
+              {Key=Environment,Value=green},
+              {Key=DeploymentBatch,Value=${{ inputs.image_tag }}},
+              {Key=InstanceNumber,Value=1}
+            ]" \
+            --query 'Instances[0].InstanceId' \
+            --output text)
+          
+          echo "instance_id=$INSTANCE_ID" >> $GITHUB_OUTPUT
+          echo "✅ Launched: $INSTANCE_ID"
+
+      - name: Wait for instance to be ready
+        run: |
+          echo "⏳ Waiting for instance to be running..."
+          aws ec2 wait instance-running --instance-ids ${{ steps.launch.outputs.instance_id }}
+          
+          echo "⏳ Waiting for status checks..."
+          aws ec2 wait instance-status-ok --instance-ids ${{ steps.launch.outputs.instance_id }}
+          
+          echo "✅ Instance is ready"
+          sleep 20
+
+      - name: Deploy application
+        id: deploy
+        run: |
+          echo "📦 Deploying application..."
+          
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "${{ steps.launch.outputs.instance_id }}" \
+            --document-name "AWS-RunShellScript" \
+            --comment "Deploy ${{ inputs.image_tag }} - Instance 1" \
+            --timeout-seconds 1800 \
+            --parameters 'commands=[
+              "#!/bin/bash",
+              "set -ex",
+              "sudo mkdir -p /home/ubuntu/quotes-app/deployment",
+              "sudo chown -R ubuntu:ubuntu /home/ubuntu/quotes-app",
+              "cd /home/ubuntu/quotes-app",
+              "aws s3 cp s3://${{ secrets.DEPLOYMENT_BUCKET }}/deployments/${{ inputs.image_tag }}/docker-compose.yml . --region ${{ inputs.aws_region }}",
+              "aws s3 cp s3://${{ secrets.DEPLOYMENT_BUCKET }}/deployments/${{ inputs.image_tag }}/deployment/ ./deployment/ --recursive --region ${{ inputs.aws_region }}",
+              "aws s3 cp s3://${{ secrets.DEPLOYMENT_BUCKET }}/deployments/${{ inputs.image_tag }}/quotes.conf . --region ${{ inputs.aws_region }}",
+              "chmod +x deployment/*.sh",
+              "bash deployment/deploy.sh ${{ secrets.DOCKER_USERNAME }} ${{ inputs.image_tag }} ${{ secrets.DOCKER_PASSWORD }} green"
+            ]' \
+            --query 'Command.CommandId' \
+            --output text)
+          
+          echo "command_id=$COMMAND_ID" >> $GITHUB_OUTPUT
+          echo "📋 Command ID: $COMMAND_ID"
+
+      - name: Wait for deployment to complete
+        run: |
+          echo "⏳ Waiting for deployment..."
+          aws ssm wait command-executed \
+            --command-id ${{ steps.deploy.outputs.command_id }} \
+            --instance-id ${{ steps.launch.outputs.instance_id }}
+          
+          echo "✅ Deployment successful"
+
+      - name: Application health check
+        run: |
+          echo "🏥 Checking application health on localhost:80..."
+          
+          HEALTH_CMD=$(aws ssm send-command \
+            --instance-ids "${{ steps.launch.outputs.instance_id }}" \
+            --document-name "AWS-RunShellScript" \
+            --comment "Health check instance 1" \
+            --timeout-seconds 120 \
+            --parameters 'commands=[
+              "for i in {1..5}; do",
+              "  if curl -f -s http://localhost:80 > /dev/null 2>&1; then",
+              "    echo \"✅ Health check passed\"",
+              "    exit 0",
+              "  fi",
+              "  echo \"Retry $i/5...\"",
+              "  sleep 10",
+              "done",
+              "echo \"❌ Health check failed\"",
+              "exit 1"
+            ]' \
+            --query 'Command.CommandId' \
+            --output text)
+          
+          set +e
+          aws ssm wait command-executed --command-id $HEALTH_CMD --instance-id ${{ steps.launch.outputs.instance_id }}
+          EXIT_CODE=$?
+          set -e
+          
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "❌ Health check failed - terminating instance"
+            aws ec2 terminate-instances --instance-ids ${{ steps.launch.outputs.instance_id }}
+            exit 1
+          fi
+          
+          echo "✅ Application is healthy"
+
+      - name: Register to green target group
+        run: |
+          echo "✅ Registering to green target group..."
+          aws elbv2 register-targets \
+            --target-group-arn ${{ secrets.GREEN_TARGET_GROUP_ARN }} \
+            --targets Id=${{ steps.launch.outputs.instance_id }}
+
+      - name: Wait for health checks
+        run: |
+          echo "⏳ Waiting for ALB health checks..."
+          aws elbv2 wait target-in-service \
+            --target-group-arn ${{ secrets.GREEN_TARGET_GROUP_ARN }} \
+            --targets Id=${{ steps.launch.outputs.instance_id }}
+          
+          echo "✅ Instance is healthy"
+
+      - name: Set traffic to 20% green, 80% blue
+        run: |
+          echo "🔀 Setting traffic split: 20% Green, 80% Blue"
+          
+          aws elbv2 modify-listener \
+            --listener-arn ${{ secrets.ALB_LISTENER_ARN }} \
+            --default-actions Type=forward,ForwardConfig="{
+              TargetGroups=[
+                {TargetGroupArn=${{ secrets.BLUE_TARGET_GROUP_ARN }},Weight=80},
+                {TargetGroupArn=${{ secrets.GREEN_TARGET_GROUP_ARN }},Weight=20}
+              ],
+              TargetGroupStickinessConfig={Enabled=false}
+            }"
+          
+          echo "✅ Traffic split configured"
+          echo "📊 Blue: 80% (4 instances) | Green: 20% (1 instance)"
