@@ -92,6 +92,16 @@ jobs:
       aws_region: ap-south-1
       total_instances: 4
 
+  approve-further-deployment:
+    needs: deploy-first
+    runs-on: ubuntu-latest
+    environment: production-approval
+    steps:
+      - name: Approval gate
+        run: |
+          echo " wants to deploy new code to rest instances or stop here"
+          echo " approval required for mving further"
+
   deploy-remaining:
     needs: [build, deploy-first]
     uses: ./.github/workflows/deploy-remaining-instances.yml
@@ -131,7 +141,7 @@ jobs:
             --output text)
           
           echo "green_ids=$GREEN_IDS" >> $GITHUB_OUTPUT
-          echo "✅ Green instances: $GREEN_IDS"
+          echo " Green instances: $GREEN_IDS"
 
       - name: Get all blue instances from target group
         id: blue
@@ -142,22 +152,22 @@ jobs:
             --output text)
           
           echo "blue_ids=$BLUE_IDS" >> $GITHUB_OUTPUT
-          echo "✅ Blue instances: $BLUE_IDS"
+          echo " Blue instances: $BLUE_IDS"
 
       - name: Switch to 100% green traffic
         run: |
-          echo "🔀 Shifting 100% traffic to green..."
+          echo "Shifting 100% traffic to green..."
           
           aws elbv2 modify-listener \
             --listener-arn ${{ secrets.ALB_LISTENER_ARN }} \
             --default-actions Type=forward,TargetGroupArn=${{ secrets.GREEN_TARGET_GROUP_ARN }}
           sleep 20
-          echo "✅ 100% traffic on green"
+          echo " 100% traffic on green"
 
       - name: Terminate all remaining blue instances
         if: steps.blue.outputs.blue_ids != ''
         run: |
-          echo "🗑️ Terminating remaining blue instances..."
+          echo " Terminating remaining blue instances..."
           
           for INSTANCE_ID in ${{ steps.blue.outputs.blue_ids }}; do
             echo "Deregistering: $INSTANCE_ID"
@@ -176,7 +186,7 @@ jobs:
 
       - name: Promote green to blue
         run: |
-          echo "🔄 Promoting green instances to blue..."
+          echo " Promoting green instances to blue..."
           
           for INSTANCE_ID in ${{ steps.green.outputs.green_ids }}; do
             aws ec2 create-tags \
@@ -187,27 +197,27 @@ jobs:
               --target-group-arn ${{ secrets.BLUE_TARGET_GROUP_ARN }} \
               --targets Id=$INSTANCE_ID
             
-            echo "✅ Promoted: $INSTANCE_ID"
+            echo " Promoted: $INSTANCE_ID"
           done
 
       - name: Wait for all targets healthy in blue
         run: |
-          echo "⏳ Waiting for all targets to be healthy in blue TG..."
+          echo "Waiting for all targets to be healthy in blue TG..."
           sleep 20 
 
       - name: Switch listener to blue
         run: |
-          echo "🔀 Switching listener to blue target group..."
+          echo "Switching listener to blue target group..."
           
           aws elbv2 modify-listener \
             --listener-arn ${{ secrets.ALB_LISTENER_ARN }} \
             --default-actions Type=forward,TargetGroupArn=${{ secrets.BLUE_TARGET_GROUP_ARN }}
           sleep 10
-          echo "✅ Listener now points to blue TG"
+          echo "Listener now points to blue TG"
 
       - name: Cleanup green target group
         run: |
-          echo "🧹 Cleaning up green target group..."
+          echo "Cleaning up green target group..."
           
           for INSTANCE_ID in ${{ steps.green.outputs.green_ids }}; do
             aws elbv2 deregister-targets \
@@ -217,4 +227,4 @@ jobs:
 
       - name: Deployment summary
         run: |
-          echo "✅ All instances running latest code in Blue TG"
+          echo "All instances running latest code in Blue TG"

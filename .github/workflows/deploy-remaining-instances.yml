@@ -24,9 +24,9 @@ jobs:
     steps:
       - name: Wait before next deployment
         run: |
-          echo "⏳ Waiting ${{ inputs.wait_minutes }} minutes before deploying instance ${{ matrix.instance_number }}..."
+          echo " Waiting ${{ inputs.wait_minutes }} minutes before deploying instance ${{ matrix.instance_number }}..."
           sleep $((${{ inputs.wait_minutes }} * 60))
-          echo "✅ Wait period complete"
+          echo " Wait period complete"
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
@@ -38,7 +38,7 @@ jobs:
       - name: Launch green instance
         id: launch
         run: |
-          echo "🚀 Launching Green Instance ${{ matrix.instance_number }}/4"
+          echo " Launching Green Instance ${{ matrix.instance_number }}/4"
           
           INSTANCE_ID=$(aws ec2 run-instances \
             --launch-template LaunchTemplateId=${{ secrets.LAUNCH_TEMPLATE_ID }} \
@@ -54,7 +54,7 @@ jobs:
             --output text)
           
           echo "instance_id=$INSTANCE_ID" >> $GITHUB_OUTPUT
-          echo "✅ Launched: $INSTANCE_ID"
+          echo "Launched: $INSTANCE_ID"
 
       - name: Wait for instance readiness
         run: |
@@ -90,7 +90,7 @@ jobs:
 
       - name: Application health check
         run: |
-          echo "🏥 Checking application health on instance ${{ matrix.instance_number }}..."
+          echo " Checking application health on instance ${{ matrix.instance_number }}..."
           
           HEALTH_CMD=$(aws ssm send-command \
             --instance-ids "${{ steps.launch.outputs.instance_id }}" \
@@ -100,13 +100,13 @@ jobs:
             --parameters 'commands=[
               "for i in {1..5}; do",
               "  if curl -f -s http://localhost:80 > /dev/null 2>&1; then",
-              "    echo \"✅ Health check passed\"",
+              "    echo \" Health check passed\"",
               "    exit 0",
               "  fi",
               "  echo \"Retry $i/5...\"",
               "  sleep 10",
               "done",
-              "echo \"❌ Health check failed\"",
+              "echo \" Health check failed\"",
               "exit 1"
             ]' \
             --query 'Command.CommandId' \
@@ -118,33 +118,33 @@ jobs:
           set -e
           
           if [ $EXIT_CODE -ne 0 ]; then
-            echo "❌ Health check failed - terminating instance"
+            echo " Health check failed - terminating instance"
             aws ec2 terminate-instances --instance-ids ${{ steps.launch.outputs.instance_id }}
-            echo "⚠️ Keeping corresponding blue instance active"
+            echo "Keeping corresponding blue instance active"
             exit 1
           fi
           
-          echo "✅ Application is healthy on instance ${{ matrix.instance_number }}"
+          echo "Application is healthy on instance ${{ matrix.instance_number }}"
 
       - name: Register to green target group
         run: |
-          echo "✅ Registering instance ${{ matrix.instance_number }} to green TG..."
+          echo "Registering instance ${{ matrix.instance_number }} to green TG..."
           aws elbv2 register-targets \
             --target-group-arn ${{ secrets.GREEN_TARGET_GROUP_ARN }} \
             --targets Id=${{ steps.launch.outputs.instance_id }}
 
       - name: Wait for health checks
         run: |
-          echo "⏳ Waiting for health checks..."
+          echo " Waiting for health checks..."
           aws elbv2 wait target-in-service \
             --target-group-arn ${{ secrets.GREEN_TARGET_GROUP_ARN }} \
             --targets Id=${{ steps.launch.outputs.instance_id }}
           
-          echo "✅ Instance ${{ matrix.instance_number }} is healthy"
+          echo " Instance ${{ matrix.instance_number }} is healthy"
 
       - name: Terminate one blue instance from target group
         run: |
-          echo "🔄 Fetching instance from Blue Target Group..."
+          echo " Fetching instance from Blue Target Group..."
           
           BLUE_INSTANCE=$(aws elbv2 describe-target-health \
             --target-group-arn ${{ secrets.BLUE_TARGET_GROUP_ARN }} \
@@ -164,14 +164,14 @@ jobs:
             echo "Terminating instance: $BLUE_INSTANCE"
             aws ec2 terminate-instances --instance-ids $BLUE_INSTANCE
             
-            echo "✅ Blue instance terminated successfully"
+            echo " Blue instance terminated successfully"
           else
-            echo "ℹ️ No instances found in Blue Target Group"
+            echo " No instances found in Blue Target Group"
           fi
 
       - name: Update traffic distribution
         run: |
-          echo "🔀 Calculating new traffic distribution..."
+          echo " Calculating new traffic distribution..."
           
           BLUE_COUNT=$(aws elbv2 describe-target-health \
             --target-group-arn ${{ secrets.BLUE_TARGET_GROUP_ARN }} \
@@ -186,15 +186,13 @@ jobs:
           TOTAL=$((BLUE_COUNT + GREEN_COUNT))
           
           if [ $TOTAL -eq 0 ]; then
-            echo "❌ No instances found!"
+            echo " No instances found!"
             exit 1
           fi
           
           BLUE_WEIGHT=$((BLUE_COUNT * 100 / TOTAL))
           GREEN_WEIGHT=$((GREEN_COUNT * 100 / TOTAL))
-          
-          echo "📊 Blue: ${BLUE_WEIGHT}% ($BLUE_COUNT instances)"
-          echo "📊 Green: ${GREEN_WEIGHT}% ($GREEN_COUNT instances)"
+          echo " Blue instances: $BLUE_COUNT, Green instances: $GREEN_COUNT"
 
           aws elbv2 modify-listener \
             --listener-arn ${{ secrets.ALB_LISTENER_ARN }} \
@@ -206,4 +204,4 @@ jobs:
               TargetGroupStickinessConfig={Enabled=false}
             }"
           sleep 20
-          echo "✅ Traffic updated successfully"
+          echo "Traffic updated successfully"
